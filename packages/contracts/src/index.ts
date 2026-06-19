@@ -10,11 +10,17 @@ const usesHttp = (value: string): boolean => {
   } catch { return false; }
 };
 const httpUrl = z.string().url().refine(usesHttp, 'Must use HTTP(S)');
+const isCleanInstanceBaseUrl = (value: string): boolean =>
+  usesHttp(value) && !value.includes('?') && !value.includes('#') && !/\s/.test(value);
+const instanceBaseUrl = z.string().url().refine(
+  isCleanInstanceBaseUrl,
+  'Must be an HTTP(S) base URL without credentials, query, or fragment'
+);
 
 export const gitLabInstanceSchema = z.object({
   id,
   name: nonEmpty.max(120),
-  baseUrl: httpUrl,
+  baseUrl: instanceBaseUrl,
   hasAccessToken: z.boolean(),
   createdAt: timestamp,
   updatedAt: timestamp
@@ -23,7 +29,7 @@ export type GitLabInstance = z.infer<typeof gitLabInstanceSchema>;
 
 export const createGitLabInstanceSchema = z.object({
   name: nonEmpty.max(120),
-  baseUrl: httpUrl.transform((url) => url.replace(/\/$/, '')),
+  baseUrl: instanceBaseUrl.transform((url) => url.replace(/\/$/, '')),
   accessToken: nonEmpty.max(2048)
 });
 export type CreateGitLabInstance = z.infer<typeof createGitLabInstanceSchema>;

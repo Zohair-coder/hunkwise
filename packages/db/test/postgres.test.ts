@@ -45,7 +45,11 @@ describe('PostgreSQL persistence', () => {
   it('applies migrations idempotently and records checksums', async () => {
     await migrate(container.getConnectionUri(), migrationsDirectory);
     const result = await pool.query<{ name: string; checksum: string }>('SELECT name, checksum FROM schema_migrations ORDER BY name');
-    expect(result.rows.map((row) => row.name)).toEqual(['001_foundation.sql', '002_review_ownership_integrity.sql']);
+    expect(result.rows.map((row) => row.name)).toEqual([
+      '001_foundation.sql',
+      '002_review_ownership_integrity.sql',
+      '003_gitlab_base_url_shape.sql'
+    ]);
     expect(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
   });
 
@@ -58,6 +62,13 @@ describe('PostgreSQL persistence', () => {
 
   it('rejects base URL userinfo at the database boundary', async () => {
     await expect(pool.query("INSERT INTO gitlab_instances (name, base_url, access_token_ciphertext) VALUES ('Unsafe', 'https://user:password@gitlab.test', 'v1:ciphertext')"))
+      .rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('rejects base URL query strings and fragments at the database boundary', async () => {
+    await expect(pool.query("INSERT INTO gitlab_instances (name, base_url, access_token_ciphertext) VALUES ('Query', 'https://gitlab.test/group?private_token=secret', 'v1:ciphertext')"))
+      .rejects.toMatchObject({ code: '23514' });
+    await expect(pool.query("INSERT INTO gitlab_instances (name, base_url, access_token_ciphertext) VALUES ('Fragment', 'https://gitlab.test/group#access_token=secret', 'v1:ciphertext')"))
       .rejects.toMatchObject({ code: '23514' });
   });
 

@@ -12,4 +12,3 @@ export function postgresSsl(mode: DatabaseSslMode): PoolConfig['ssl'] {
   if (mode === 'disable') return false;
   return { rejectUnauthorized: mode === 'verify-full' };
 }
-

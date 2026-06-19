@@ -15,4 +15,3 @@ export class DecryptingInstanceCredentialProvider implements InstanceCredentialP
     return encrypted === null ? null : this.cipher.decrypt(encrypted) as GitLabAccessToken;
   }
 }
-

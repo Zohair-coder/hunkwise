@@ -122,12 +122,14 @@ const PanelState = ({ title, body, error = false }: { title: string; body: strin
 function ReviewShell({ reviewId, onBack }: { reviewId?: string; onBack: () => void }) {
   const [state, setState] = useState<DetailState>(reviewId ? { kind: 'loading' } : { kind: 'preview' });
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const [fileFilter, setFileFilter] = useState('');
   const [activityTab, setActivityTab] = useState<'findings' | 'chat'>('findings');
   const [mobilePane, setMobilePane] = useState<MobilePane>('diff');
   useEffect(() => {
     if (!reviewId) return;
     let active = true;
     setState({ kind: 'loading' });
+    setFileFilter('');
     void api.review(reviewId).then((detail) => {
       if (!active) return;
       setState({ kind: 'ready', detail });
@@ -139,6 +141,10 @@ function ReviewShell({ reviewId, onBack }: { reviewId?: string; onBack: () => vo
   }, [reviewId]);
 
   const detail = state.kind === 'ready' ? state.detail : null;
+  const normalizedFileFilter = fileFilter.trim().toLocaleLowerCase();
+  const filteredFiles = detail?.files.filter((file) =>
+    file.newPath.toLocaleLowerCase().includes(normalizedFileFilter)
+  ) ?? [];
   const selectedFile: DiffFile | undefined = detail?.files.find((file) => file.id === selectedFileId);
   const selectedHunks = selectedFile ? detail?.hunks.filter((hunk) => hunk.diffFileId === selectedFile.id) ?? [] : [];
   const title = detail ? `Review ${detail.run.id.slice(0, 8)}` : reviewId ? 'Loading review…' : 'Review workspace';
@@ -153,12 +159,22 @@ function ReviewShell({ reviewId, onBack }: { reviewId?: string; onBack: () => vo
     </nav>
     <div className="review-shell">
       <aside className={`files-panel${mobilePane === 'files' ? ' mobile-active' : ''}`}>
-        <div className="panel-title"><span>Changed files</span><small>{detail?.files.length ?? 0}</small></div>
-        <div className="file-filter">⌕ <span>Filter files</span></div>
+        <div className="panel-title"><span>Changed files</span><small>{detail ? filteredFiles.length : 0}</small></div>
+        <label className="file-filter">
+          <Icon>⌕</Icon>
+          <input
+            aria-label="Filter files by path"
+            type="search"
+            value={fileFilter}
+            onChange={(event) => setFileFilter(event.target.value)}
+            placeholder="Filter files"
+          />
+        </label>
         {state.kind === 'loading' && <PanelState title="Loading files" body="Fetching persisted review detail…" />}
         {state.kind === 'error' && <PanelState error title="Files unavailable" body={state.message} />}
         {(state.kind === 'preview' || (detail && detail.files.length === 0)) && <PanelState title="No changed files" body={state.kind === 'preview' ? 'Select a persisted review to inspect its files.' : 'No diff files have been stored for this run yet.'} />}
-        {detail?.files.map((file) => <button className={file.id === selectedFileId ? 'active' : ''} onClick={() => { setSelectedFileId(file.id); setMobilePane('diff'); }} key={file.id}><span>{file.status.slice(0, 1).toUpperCase()}</span><span>{file.newPath}</span><small>+{file.additions} −{file.deletions}</small></button>)}
+        {detail && detail.files.length > 0 && filteredFiles.length === 0 && <PanelState title="No matching files" body={`No changed file path contains “${fileFilter.trim()}”.`} />}
+        {filteredFiles.map((file) => <button className={file.id === selectedFileId ? 'active' : ''} onClick={() => { setSelectedFileId(file.id); setMobilePane('diff'); }} key={file.id}><span>{file.status.slice(0, 1).toUpperCase()}</span><span>{file.newPath}</span><small>+{file.additions} −{file.deletions}</small></button>)}
       </aside>
       <section className={`diff-panel${mobilePane === 'diff' ? ' mobile-active' : ''}`}>
         <div className="diff-toolbar"><span>{selectedFile?.newPath ?? 'Diff'}</span><div><span className="quiet">Persisted patch</span></div></div>

@@ -16,6 +16,14 @@ describe('API contracts', () => {
     expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: 'https://user@gitlab.example.com', accessToken: 'secret' }).success).toBe(false);
   });
 
+  it('rejects instance URLs containing query strings or fragments', () => {
+    expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: 'https://gitlab.example.com/group?private_token=secret', accessToken: 'secret' }).success).toBe(false);
+    expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: 'https://gitlab.example.com/group#access_token=secret', accessToken: 'secret' }).success).toBe(false);
+    expect(updateGitLabInstanceSchema.safeParse({ baseUrl: 'https://gitlab.example.com?' }).success).toBe(false);
+    expect(updateGitLabInstanceSchema.safeParse({ baseUrl: 'https://gitlab.example.com#' }).success).toBe(false);
+    expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: ' https://gitlab.example.com/group', accessToken: 'secret' }).success).toBe(false);
+  });
+
   it('rejects empty updates', () => {
     expect(updateGitLabInstanceSchema.safeParse({}).success).toBe(false);
   });

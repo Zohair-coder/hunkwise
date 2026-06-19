@@ -61,6 +61,43 @@ describe('App', () => {
     expect(screen.getByText('Persisted chat answer')).toBeInTheDocument();
   });
 
+  it('filters persisted diff files by path and shows an empty-results state', async () => {
+    const now = new Date().toISOString();
+    const run = { id: 'd9924f07-410b-4a84-b858-5f24e82f26c0', mergeRequestId: '5c9dc9f2-66ad-493c-9f7e-363eb008be1e', status: 'completed', sourceSha: 'abc123456789', summary: null, errorMessage: null, startedAt: now, completedAt: now, createdAt: now, updatedAt: now };
+    const detail = {
+      run,
+      files: [
+        { id: '5f86ac44-7dfc-41da-bc4e-28cbd24a04c1', reviewRunId: run.id, oldPath: 'src/real.ts', newPath: 'src/real.ts', status: 'modified', additions: 1, deletions: 0 },
+        { id: '05b6f6a5-1ac5-4499-a7dd-f2fd0f310351', reviewRunId: run.id, oldPath: null, newPath: 'services/api.ts', status: 'added', additions: 4, deletions: 0 }
+      ],
+      hunks: [],
+      findings: [],
+      discussions: [],
+      comments: [],
+      chatMessages: []
+    };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url === `/api/reviews/${run.id}`) return Promise.resolve(jsonResponse(detail));
+      if (url.startsWith('/api/reviews?')) return Promise.resolve(jsonResponse({ items: [run], total: 1, limit: 20, offset: 0 }));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    }));
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole('button', { name: /Review d9924f07/i }));
+    const filter = await screen.findByRole('searchbox', { name: 'Filter files by path' });
+    expect(screen.getByRole('button', { name: /src\/real\.ts/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /services\/api\.ts/i })).toBeInTheDocument();
+
+    await userEvent.type(filter, 'SERVICES');
+    expect(screen.queryByRole('button', { name: /src\/real\.ts/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /services\/api\.ts/i })).toBeInTheDocument();
+
+    await userEvent.clear(filter);
+    await userEvent.type(filter, 'not-present');
+    expect(screen.getByText('No matching files')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /services\/api\.ts/i })).not.toBeInTheDocument();
+  });
+
   it('renders an honest review-detail error state', async () => {
     const now = new Date().toISOString();
     const run = { id: 'd9924f07-410b-4a84-b858-5f24e82f26c0', mergeRequestId: '5c9dc9f2-66ad-493c-9f7e-363eb008be1e', status: 'failed', sourceSha: 'abc123', summary: null, errorMessage: null, startedAt: now, completedAt: now, createdAt: now, updatedAt: now };

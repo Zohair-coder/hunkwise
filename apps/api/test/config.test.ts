@@ -14,4 +14,3 @@ describe('database TLS configuration', () => {
     expect(() => loadConfig({ ...base, DATABASE_SSL_MODE: 'prefer' })).toThrow();
   });
 });
-

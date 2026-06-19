@@ -56,6 +56,10 @@ docker compose up --build
 
 The app applies checksum-verified migrations under a PostgreSQL advisory lock, then serves the API and built frontend at `http://localhost:3000`. Compose explicitly uses `DATABASE_SSL_MODE=disable` for its private local network. Production defaults to `verify-full`; `require` and `disable` must be selected explicitly when certificate verification is not available. The Compose password is for local use; set `POSTGRES_PASSWORD` outside local development. The app container runs as an unprivileged user.
 
+### Dependency audit note
+
+As of June 19, 2026, the full development dependency audit reports the low-severity `GHSA-g7r4-m6w7-qqqr` advisory in `esbuild@0.27.7`. It is introduced by `tsup@8.5.1`, the latest compatible `tsup` release, whose declared range is `esbuild ^0.27.0`. The advisory is fixed in `esbuild@0.28.1`, which is outside that range. No override is applied because forcing the incompatible major-minor line would bypass the build tool's compatibility contract. Production dependencies audit cleanly with `npm audit --omit=dev`.
+
 ## REST contracts
 
 | Method | Path | Behavior |

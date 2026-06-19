@@ -91,6 +91,37 @@ describe('API', () => {
     await app.close();
   });
 
+  it('rejects GitLab base URL query strings and fragments without echoing them', async () => {
+    const { app } = await setup();
+    for (const baseUrl of [
+      'https://gitlab.example.com/group?private_token=glpat-secret',
+      'https://gitlab.example.com/group#access_token=glpat-secret'
+    ]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/instances',
+        payload: { name: 'Unsafe', baseUrl, accessToken: 'secret' }
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe('validation_error');
+      expect(response.body).not.toContain('glpat-secret');
+    }
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/instances',
+      payload: { name: 'Safe', baseUrl: 'https://gitlab.example.com/group', accessToken: 'secret' }
+    });
+    const updated = await app.inject({
+      method: 'PATCH',
+      url: `/api/instances/${created.json().id}`,
+      payload: { baseUrl: 'https://gitlab.example.com/group?private_token=glpat-secret' }
+    });
+    expect(updated.statusCode).toBe(400);
+    expect(updated.body).not.toContain('glpat-secret');
+    await app.close();
+  });
+
   it('preserves parser, body limit, and UUID error semantics in the standard envelope', async () => {
     const { app } = await setup();
     const malformed = await app.inject({ method: 'POST', url: '/api/instances', headers: { 'content-type': 'application/json', 'x-request-id': 'bad-json' }, payload: '{"name":' });
