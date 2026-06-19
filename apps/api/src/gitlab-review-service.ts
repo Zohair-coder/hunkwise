@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import type {
+  AiReviewPostResponse,
   CreateDiffDiscussion,
   CreateOverviewDiscussion,
+  Finding,
   GitLabDiscussionActionResponse,
   GitLabWebhookResponse,
   ReviewRunReference,
@@ -9,31 +11,41 @@ import type {
   TestGitLabInstanceResponse
 } from '@hunkwise/contracts';
 import type { GitLabInstance } from '@hunkwise/contracts';
-import type { GitLabReviewSnapshot, GitLabReviewStore, HunkwiseStore } from '@hunkwise/db';
+import type { AiReviewStore, GitLabReviewSnapshot, GitLabReviewStore, HunkwiseStore } from '@hunkwise/db';
+import {
+  type AiReviewClient,
+  buildReviewPrompt,
+  parseModelOutput,
+  toFindingRecords
+} from './ai-review.js';
 import type { InstanceCredentialProvider } from './credentials.js';
 import { diffFileStatus, parseUnifiedDiff } from './diff.js';
 import { GitLabClient, type GitLabClientOptions, type GitLabDiscussion, type GitLabMergeRequest, type GitLabNote } from './gitlab-client.js';
 import { parseGitLabMergeRequestUrl } from './gitlab-url.js';
 
-const ingestionSummary = 'GitLab ingestion complete; AI review pending Slice 3';
+const ingestionSummary = 'GitLab ingestion complete';
 
 export class GitLabReviewServiceError extends Error {
-  constructor(readonly code: 'instance_not_found' | 'token_not_found' | 'review_not_found' | 'discussion_not_found' | 'unsupported_webhook', message: string) {
+  constructor(readonly code: 'instance_not_found' | 'token_not_found' | 'review_not_found' | 'discussion_not_found' | 'unsupported_webhook' | 'ai_not_configured' | 'finding_not_found' | 'finding_not_postable', message: string) {
     super(message);
     this.name = 'GitLabReviewServiceError';
   }
 }
 
-type Store = HunkwiseStore & GitLabReviewStore;
+type Store = HunkwiseStore & GitLabReviewStore & AiReviewStore;
 
 export interface GitLabReviewServiceOptions {
   clientFactory?: (options: GitLabClientOptions) => GitLabClient;
+  aiClient?: AiReviewClient;
+  aiModel?: string;
 }
 
 export interface GitLabReviewActions {
   testInstance(instanceId: string): Promise<TestGitLabInstanceResponse>;
   submit(input: SubmitReview): Promise<ReviewRunReference>;
   refresh(reviewRunId: string): Promise<ReviewRunReference>;
+  runAiReview(reviewRunId: string, options?: { autoPost?: boolean; force?: boolean }): Promise<ReviewRunReference>;
+  postAiReview(reviewRunId: string, input: { includeOverview: boolean; findingIds: string[] }): Promise<AiReviewPostResponse>;
   addOverviewDiscussion(reviewRunId: string, input: CreateOverviewDiscussion): Promise<GitLabDiscussionActionResponse>;
   addDiffDiscussion(reviewRunId: string, input: CreateDiffDiscussion): Promise<GitLabDiscussionActionResponse>;
   replyToDiscussion(localDiscussionId: string, body: string): Promise<GitLabDiscussionActionResponse>;
@@ -45,11 +57,15 @@ export class GitLabReviewService implements GitLabReviewActions {
   readonly #store: Store;
   readonly #credentials: InstanceCredentialProvider;
   readonly #clientFactory: (options: GitLabClientOptions) => GitLabClient;
+  readonly #aiClient: AiReviewClient | null;
+  readonly #aiModel: string;
 
   constructor(store: Store, credentials: InstanceCredentialProvider, options: GitLabReviewServiceOptions = {}) {
     this.#store = store;
     this.#credentials = credentials;
     this.#clientFactory = options.clientFactory ?? ((clientOptions) => new GitLabClient(clientOptions));
+    this.#aiClient = options.aiClient ?? null;
+    this.#aiModel = options.aiModel ?? 'gpt-4.1-mini';
   }
 
   async testInstance(instanceId: string): Promise<TestGitLabInstanceResponse> {
@@ -62,14 +78,107 @@ export class GitLabReviewService implements GitLabReviewActions {
   async submit(input: SubmitReview): Promise<ReviewRunReference> {
     const instance = await this.#instance(input.instanceId);
     const parsed = parseGitLabMergeRequestUrl(instance.baseUrl, input.mergeRequestUrl);
-    return this.#ingest(instance, parsed.projectPath, parsed.mergeRequestIid);
+    const result = await this.#ingest(instance, parsed.projectPath, parsed.mergeRequestIid);
+    if (!input.runAi) return result;
+    const reviewed = await this.runAiReview(result.runId, { autoPost: input.autoPost });
+    return reviewed;
   }
 
   async refresh(reviewRunId: string): Promise<ReviewRunReference> {
     const context = await this.#store.getReviewContext(reviewRunId);
     if (!context) throw new GitLabReviewServiceError('review_not_found', 'Review run not found');
     const instance = await this.#instance(context.instanceId);
-    return this.#ingest(instance, context.projectPathWithNamespace, context.mergeRequestIid);
+    const result = await this.#ingest(instance, context.projectPathWithNamespace, context.mergeRequestIid);
+    return result;
+  }
+
+  async runAiReview(reviewRunId: string, options: { autoPost?: boolean; force?: boolean } = {}): Promise<ReviewRunReference> {
+    if (!this.#aiClient) throw new GitLabReviewServiceError('ai_not_configured', 'OpenAI review is not configured');
+    const context = await this.#store.getReviewContext(reviewRunId);
+    if (!context) throw new GitLabReviewServiceError('review_not_found', 'Review run not found');
+    const detail = await this.#store.getReview(reviewRunId);
+    if (!detail) throw new GitLabReviewServiceError('review_not_found', 'Review run not found');
+    if (!options.force && detail.run.status === 'completed' && detail.findings.length > 0) {
+      return { runId: reviewRunId, status: detail.run.status, summary: detail.run.summary };
+    }
+
+    await this.#store.startAiReview(reviewRunId);
+    try {
+      const prompt = buildReviewPrompt(detail, context);
+      const raw = await this.#aiClient.review({ model: this.#aiModel, system: prompt.system, user: prompt.user });
+      const output = parseModelOutput(raw);
+      await this.#store.completeAiReview({
+        reviewRunId,
+        model: this.#aiModel,
+        summary: output.summary,
+        overviewCommentBody: output.overviewCommentBody,
+        findings: toFindingRecords(output, detail, context)
+      });
+      if (options.autoPost) {
+        const updated = await this.#store.getReview(reviewRunId);
+        const postable = updated?.findings.filter((finding) => finding.shouldPost).map((finding) => finding.id) ?? [];
+        await this.postAiReview(reviewRunId, { includeOverview: true, findingIds: postable });
+      }
+      const updated = await this.#store.getReview(reviewRunId);
+      return { runId: reviewRunId, status: updated?.run.status ?? 'completed', summary: updated?.run.summary ?? output.summary };
+    } catch (error) {
+      const safe = sanitizeServiceError(error);
+      await this.#store.failAiReview(reviewRunId, safe);
+      return { runId: reviewRunId, status: 'failed', summary: null };
+    }
+  }
+
+  async postAiReview(reviewRunId: string, input: { includeOverview: boolean; findingIds: string[] }): Promise<AiReviewPostResponse> {
+    const context = await this.#store.getReviewContext(reviewRunId);
+    if (!context) throw new GitLabReviewServiceError('review_not_found', 'Review run not found');
+    const detail = await this.#store.getReview(reviewRunId);
+    if (!detail) throw new GitLabReviewServiceError('review_not_found', 'Review run not found');
+    const client = await this.#client(await this.#instance(context.instanceId));
+    const items: AiReviewPostResponse['items'] = [];
+
+    if (input.includeOverview) {
+      const overviewBody = detail.run.overviewCommentBody;
+      const alreadyPosted = overviewBody
+        ? detail.discussions.some((discussion) => discussion.gitlabDiscussionId && detail.comments.some((comment) => comment.discussionId === discussion.id && comment.authorType === 'hunkwise' && comment.body === overviewBody))
+        : false;
+      if (alreadyPosted) {
+        items.push({ findingId: null, gitlabDiscussionId: null, skipped: true, reason: 'already_posted' });
+      } else if (!overviewBody) {
+        items.push({ findingId: null, gitlabDiscussionId: null, skipped: true, reason: 'missing_review_result' });
+      } else {
+        const body = overviewBody;
+        const discussion = await client.createOverviewDiscussion(context.projectGitlabId, context.mergeRequestIid, body);
+        const note = firstNote(discussion);
+        await this.#store.recordAiOverviewPosted({
+          reviewRunId,
+          gitlabDiscussionId: discussion.id,
+          gitlabNoteId: note?.id === undefined ? null : String(note.id),
+          body
+        });
+        items.push({ findingId: null, gitlabDiscussionId: discussion.id, gitlabNoteId: note?.id === undefined ? null : String(note.id), skipped: false });
+      }
+    }
+
+    const uniqueFindingIds = [...new Set(input.findingIds)];
+    for (const findingId of uniqueFindingIds) {
+      const finding = detail.findings.find((candidate) => candidate.id === findingId);
+      if (!finding) throw new GitLabReviewServiceError('finding_not_found', 'AI finding not found');
+      if (finding.gitlabDiscussionId) {
+        items.push({ findingId, gitlabDiscussionId: finding.gitlabDiscussionId, gitlabNoteId: finding.gitlabNoteId, skipped: true, reason: 'already_posted' });
+        continue;
+      }
+      if (!finding.shouldPost || !finding.gitlabPosition) {
+        items.push({ findingId, gitlabDiscussionId: null, skipped: true, reason: 'not_postable' });
+        continue;
+      }
+      const body = findingCommentBody(finding);
+      const discussion = await client.createDiffDiscussion(context.projectGitlabId, context.mergeRequestIid, body, finding.gitlabPosition);
+      const note = firstNote(discussion);
+      const gitlabNoteId = note?.id === undefined ? null : String(note.id);
+      await this.#store.recordAiFindingPosted({ reviewRunId, findingId, gitlabDiscussionId: discussion.id, gitlabNoteId });
+      items.push({ findingId, gitlabDiscussionId: discussion.id, gitlabNoteId, skipped: false });
+    }
+    return { items };
   }
 
   async addOverviewDiscussion(reviewRunId: string, input: CreateOverviewDiscussion): Promise<GitLabDiscussionActionResponse> {
@@ -247,4 +356,23 @@ const webhookTarget = (payload: unknown): { projectPath: string; mergeRequestIid
   const projectPath = getString(project?.path_with_namespace);
   const iid = getNumber(objectAttributes?.iid) ?? getNumber(mergeRequest?.iid);
   return projectPath && iid ? { projectPath, mergeRequestIid: iid } : null;
+};
+
+const sanitizeServiceError = (error: unknown): Error => {
+  const message = error instanceof Error ? error.message : 'AI review failed';
+  return new Error(message
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
+    .replace(/glpat-[A-Za-z0-9_-]{4,}/g, '[redacted]')
+    .replace(/(api[_-]?key|access[_-]?token|private[_-]?token|authorization)(["'\s:=]+)[^"'\s,}]+/gi, '$1$2[redacted]')
+    .slice(0, 2000));
+};
+
+const findingCommentBody = (finding: Finding): string => {
+  const parts = [
+    `**${finding.title}**`,
+    finding.rationale,
+    finding.suggestedFix ? `Suggested fix: ${finding.suggestedFix}` : null,
+    `Category: ${finding.category}; severity: ${finding.severity}; confidence: ${Math.round(finding.confidence * 100)}%`
+  ].filter((part): part is string => part !== null);
+  return parts.join('\n\n');
 };

@@ -8,9 +8,11 @@ import {
   createGitLabInstanceSchema,
   createDiffDiscussionSchema,
   createOverviewDiscussionSchema,
+  postAiReviewSchema,
   replyDiscussionSchema,
   paginationSchema,
   submitReviewSchema,
+  triggerAiReviewSchema,
   updateDiscussionResolutionSchema,
   updateGitLabInstanceSchema
 } from '@hunkwise/contracts';
@@ -102,7 +104,11 @@ export async function buildApp(dependencies: AppDependencies, options: BuildAppO
       code = error.code;
       message = error.message;
     } else if (error instanceof GitLabReviewServiceError) {
-      statusCode = error.code === 'instance_not_found' || error.code === 'review_not_found' || error.code === 'discussion_not_found' ? 404 : 400;
+      statusCode = error.code === 'instance_not_found' || error.code === 'review_not_found' || error.code === 'discussion_not_found' || error.code === 'finding_not_found'
+        ? 404
+        : error.code === 'ai_not_configured'
+          ? 503
+          : 400;
       code = error.code;
       message = error.message;
     } else if (isPgUniqueViolation(error)) {
@@ -191,6 +197,15 @@ export async function buildApp(dependencies: AppDependencies, options: BuildAppO
   app.post('/api/reviews/:id/refresh', async (request, reply) => {
     const result = await dependencies.gitlabReview.refresh(idParams(request.params));
     return reply.status(202).send(result);
+  });
+  app.post('/api/reviews/:id/ai-review', async (request, reply) => {
+    const input = triggerAiReviewSchema.parse(request.body ?? {});
+    const result = await dependencies.gitlabReview.runAiReview(idParams(request.params), input);
+    return reply.status(202).send(result);
+  });
+  app.post('/api/reviews/:id/ai-review/post', async (request, reply) => {
+    const result = await dependencies.gitlabReview.postAiReview(idParams(request.params), postAiReviewSchema.parse(request.body));
+    return reply.status(201).send(result);
   });
   app.post('/api/reviews/:id/gitlab/discussions', async (request, reply) => {
     const result = await dependencies.gitlabReview.addOverviewDiscussion(idParams(request.params), createOverviewDiscussionSchema.parse(request.body));

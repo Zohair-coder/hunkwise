@@ -51,7 +51,8 @@ describe('PostgreSQL persistence', () => {
       '003_gitlab_base_url_shape.sql',
       '004_case_insensitive_gitlab_base_url.sql',
       '005_gitlab_webhook_events.sql',
-      '006_gitlab_webhook_processing_state.sql'
+      '006_gitlab_webhook_processing_state.sql',
+      '007_ai_review_results.sql'
     ]);
     expect(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
   });
@@ -121,7 +122,7 @@ describe('PostgreSQL persistence', () => {
         resolved: false,
         comments: [{ authorType: 'gitlab', authorName: 'bob', body: 'Existing', gitlabNoteId: 'note-1', createdAt: '2026-01-01T00:00:00Z' }]
       }],
-      summary: 'GitLab ingestion complete; AI review pending Slice 3'
+      summary: 'GitLab ingestion complete'
     };
 
     const first = await store.upsertGitLabReviewSnapshot(snapshot);
@@ -143,6 +144,81 @@ describe('PostgreSQL persistence', () => {
     expect(detail?.hunks).toMatchObject([{ header: '@@ -1 +1 @@', position: 0 }]);
     expect(detail?.discussions).toMatchObject([{ gitlabDiscussionId: 'discussion-1', resolved: false }]);
     expect(detail?.comments).toMatchObject([{ body: 'Existing', gitlabNoteId: 'note-1' }, { body: 'Follow-up', gitlabNoteId: 'note-2' }]);
+
+    await store.failAiReview(first.runId, new Error('invalid model output'));
+    const afterFailedAi = await store.upsertGitLabReviewSnapshot(snapshot);
+    expect(afterFailedAi).toMatchObject({ runId: first.runId, status: 'completed', summary: 'GitLab ingestion complete' });
+    expect((await store.listReviews({ limit: 20, offset: 0 })).total).toBe(1);
+  });
+
+  it('persists structured AI findings and records idempotent GitLab posting state', async () => {
+    const instance = await store.createInstance({ name: 'AI GitLab', baseUrl: 'https://gitlab.ai.test', encryptedAccessToken: 'v1:ciphertext' as EncryptedSecret });
+    const snapshot: GitLabReviewSnapshot = {
+      instanceId: instance.id,
+      project: { gitlabId: 123, pathWithNamespace: 'group/project', defaultBranch: 'main', webUrl: 'https://gitlab.ai.test/group/project' },
+      mergeRequest: {
+        gitlabIid: 7,
+        title: 'MR',
+        authorUsername: 'alice',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        sourceSha: 'head-sha',
+        targetSha: 'base-sha',
+        state: 'open',
+        webUrl: 'https://gitlab.ai.test/group/project/-/merge_requests/7'
+      },
+      files: [{
+        oldPath: 'a.ts',
+        newPath: 'a.ts',
+        status: 'modified',
+        additions: 1,
+        deletions: 0,
+        hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, header: '@@ -1 +1,2 @@', patch: '@@ -1 +1,2 @@\n const x = 1;\n+throw new Error()', position: 0 }]
+      }],
+      discussions: [],
+      summary: 'GitLab ingestion complete'
+    };
+    const run = await store.upsertGitLabReviewSnapshot(snapshot);
+    const hunkId = (await store.getReview(run.runId))!.hunks[0]!.id;
+
+    await store.startAiReview(run.runId);
+    await store.completeAiReview({
+      reviewRunId: run.runId,
+      model: 'gpt-test',
+      summary: 'One issue found',
+      overviewCommentBody: 'Overview body',
+      findings: [{
+        aiFindingKey: 'stable-key',
+        diffHunkId: hunkId,
+        severity: 'error',
+        category: 'bug',
+        title: 'Unexpected throw',
+        rationale: 'The parser throws.',
+        filePath: 'a.ts',
+        line: 2,
+        lineEnd: 2,
+        confidence: 0.9,
+        suggestedFix: 'Return an error value.',
+        shouldPost: true,
+        gitlabPosition: { baseSha: 'base-sha', startSha: 'base-sha', headSha: 'head-sha', oldPath: 'a.ts', newPath: 'a.ts', positionType: 'text', newLine: 2 }
+      }]
+    });
+    const detail = await store.getReview(run.runId);
+    expect(detail?.run).toMatchObject({ status: 'completed', aiModel: 'gpt-test', overviewCommentBody: 'Overview body' });
+    expect(detail?.findings).toMatchObject([{ category: 'bug', suggestedFix: 'Return an error value.', shouldPost: true, gitlabPosition: { newLine: 2 } }]);
+
+    const findingId = detail!.findings[0]!.id;
+    await store.recordAiFindingPosted({ reviewRunId: run.runId, findingId, gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-1' });
+    await store.recordAiFindingPosted({ reviewRunId: run.runId, findingId, gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-1' });
+    await store.recordAiOverviewPosted({ reviewRunId: run.runId, gitlabDiscussionId: 'overview-1', gitlabNoteId: 'overview-note-1', body: 'Overview body' });
+    await store.recordAiOverviewPosted({ reviewRunId: run.runId, gitlabDiscussionId: 'overview-1', gitlabNoteId: 'overview-note-1', body: 'Overview body' });
+
+    const posted = await store.getReview(run.runId);
+    expect(posted?.findings[0]).toMatchObject({ gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-1' });
+    expect(posted?.discussions.filter((discussion) => discussion.gitlabDiscussionId === 'discussion-1')).toHaveLength(1);
+    expect(posted?.discussions.filter((discussion) => discussion.gitlabDiscussionId === 'overview-1')).toHaveLength(1);
+    expect(posted?.comments.filter((comment) => comment.gitlabNoteId === 'note-1')).toHaveLength(1);
+    expect(posted?.comments.filter((comment) => comment.gitlabNoteId === 'overview-note-1')).toHaveLength(1);
   });
 
   it('retries failed webhook events and suppresses only completed duplicates', async () => {

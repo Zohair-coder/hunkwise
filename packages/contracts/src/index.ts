@@ -83,6 +83,8 @@ export const reviewRunSchema = z.object({
   sourceSha: nonEmpty,
   summary: z.string().nullable(),
   errorMessage: z.string().nullable(),
+  aiModel: z.string().nullable(),
+  overviewCommentBody: z.string().nullable(),
   startedAt: timestamp.nullable(),
   completedAt: timestamp.nullable(),
   createdAt: timestamp,
@@ -115,17 +117,43 @@ export const diffHunkSchema = z.object({
 });
 export type DiffHunk = z.infer<typeof diffHunkSchema>;
 
+export const findingCategorySchema = z.enum(['bug', 'security', 'maintainability', 'test', 'docs', 'performance', 'other']);
+export type FindingCategory = z.infer<typeof findingCategorySchema>;
+
+export const findingSeveritySchema = z.enum(['info', 'warning', 'error', 'critical']);
+export type FindingSeverity = z.infer<typeof findingSeveritySchema>;
+
+export const gitLabPositionSchema = z.object({
+  baseSha: nonEmpty,
+  startSha: nonEmpty,
+  headSha: nonEmpty,
+  oldPath: nonEmpty,
+  newPath: nonEmpty,
+  positionType: z.literal('text').default('text'),
+  oldLine: z.number().int().positive().optional(),
+  newLine: z.number().int().positive().optional()
+}).refine((value) => value.oldLine !== undefined || value.newLine !== undefined, 'A diff position requires oldLine or newLine');
+export type GitLabPosition = z.infer<typeof gitLabPositionSchema>;
+
 export const findingSchema = z.object({
   id,
   reviewRunId: id,
   diffHunkId: id.nullable(),
-  severity: z.enum(['info', 'warning', 'error', 'critical']),
-  category: nonEmpty,
+  severity: findingSeveritySchema,
+  category: findingCategorySchema,
   title: nonEmpty,
   body: nonEmpty,
+  rationale: nonEmpty,
   filePath: nonEmpty,
   line: z.number().int().positive().nullable(),
+  lineEnd: z.number().int().positive().nullable(),
   confidence: z.number().min(0).max(1),
+  suggestedFix: z.string().nullable(),
+  shouldPost: z.boolean(),
+  gitlabPosition: gitLabPositionSchema.nullable(),
+  gitlabDiscussionId: z.string().nullable(),
+  gitlabNoteId: z.string().nullable(),
+  postedAt: timestamp.nullable(),
   status: z.enum(['open', 'dismissed', 'fixed']),
   createdAt: timestamp
 });
@@ -163,9 +191,12 @@ export type ChatMessage = z.infer<typeof chatMessageSchema>;
 
 export const submitReviewSchema = z.object({
   instanceId: id,
-  mergeRequestUrl: httpUrl
+  mergeRequestUrl: httpUrl,
+  runAi: z.boolean().default(false),
+  autoPost: z.boolean().default(false)
 });
 export type SubmitReview = z.infer<typeof submitReviewSchema>;
+export type SubmitReviewInput = z.input<typeof submitReviewSchema>;
 
 export const reviewRunReferenceSchema = z.object({
   runId: id,
@@ -180,18 +211,6 @@ export const testGitLabInstanceResponseSchema = z.object({
   version: z.string().nullable()
 });
 export type TestGitLabInstanceResponse = z.infer<typeof testGitLabInstanceResponseSchema>;
-
-export const gitLabPositionSchema = z.object({
-  baseSha: nonEmpty,
-  startSha: nonEmpty,
-  headSha: nonEmpty,
-  oldPath: nonEmpty,
-  newPath: nonEmpty,
-  positionType: z.literal('text').default('text'),
-  oldLine: z.number().int().positive().optional(),
-  newLine: z.number().int().positive().optional()
-}).refine((value) => value.oldLine !== undefined || value.newLine !== undefined, 'A diff position requires oldLine or newLine');
-export type GitLabPosition = z.infer<typeof gitLabPositionSchema>;
 
 export const createOverviewDiscussionSchema = z.object({ body: nonEmpty.max(65_536) });
 export type CreateOverviewDiscussion = z.infer<typeof createOverviewDiscussionSchema>;
@@ -214,6 +233,30 @@ export const gitLabDiscussionActionResponseSchema = z.object({
   resolved: z.boolean().optional()
 });
 export type GitLabDiscussionActionResponse = z.infer<typeof gitLabDiscussionActionResponseSchema>;
+
+export const triggerAiReviewSchema = z.object({
+  autoPost: z.boolean().default(false),
+  force: z.boolean().default(false)
+});
+export type TriggerAiReview = z.infer<typeof triggerAiReviewSchema>;
+
+export const postAiReviewSchema = z.object({
+  includeOverview: z.boolean().default(false),
+  findingIds: z.array(id).default([])
+}).refine((value) => value.includeOverview || value.findingIds.length > 0, 'Select an overview or at least one finding to post');
+export type PostAiReview = z.infer<typeof postAiReviewSchema>;
+
+export const aiReviewPostItemSchema = z.object({
+  findingId: id.nullable(),
+  gitlabDiscussionId: z.string().nullable(),
+  gitlabNoteId: z.string().nullable().optional(),
+  skipped: z.boolean(),
+  reason: z.string().optional()
+});
+export const aiReviewPostResponseSchema = z.object({
+  items: z.array(aiReviewPostItemSchema)
+});
+export type AiReviewPostResponse = z.infer<typeof aiReviewPostResponseSchema>;
 
 export const gitLabWebhookResponseSchema = z.object({
   accepted: z.boolean(),

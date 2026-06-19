@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   CreateDiffDiscussion,
   CreateOverviewDiscussion,
+  AiReviewPostResponse,
   GitLabDiscussionActionResponse,
   GitLabWebhookResponse,
   GitLabInstance,
@@ -49,13 +50,23 @@ class MemoryStore implements HunkwiseStore {
 
 class FakeGitLabReview implements GitLabReviewActions {
   submissions: SubmitReview[] = [];
+  aiRuns: Array<{ reviewRunId: string; options: { autoPost?: boolean; force?: boolean } }> = [];
+  aiPosts: Array<{ reviewRunId: string; input: { includeOverview: boolean; findingIds: string[] } }> = [];
   webhooks: Array<{ instanceId: string; eventType: string; eventKey: string | null; payload: unknown }> = [];
   async testInstance(): Promise<TestGitLabInstanceResponse> { return { ok: true, username: 'root', version: '17.0.0' }; }
   async submit(input: SubmitReview): Promise<ReviewRunReference> {
     this.submissions.push(input);
-    return { runId: randomUUID(), status: 'completed', summary: 'GitLab ingestion complete; AI review pending Slice 3' };
+    return { runId: randomUUID(), status: 'completed', summary: 'GitLab ingestion complete' };
   }
-  async refresh(): Promise<ReviewRunReference> { return { runId: randomUUID(), status: 'completed', summary: 'GitLab ingestion complete; AI review pending Slice 3' }; }
+  async refresh(): Promise<ReviewRunReference> { return { runId: randomUUID(), status: 'completed', summary: 'GitLab ingestion complete' }; }
+  async runAiReview(reviewRunId: string, options: { autoPost?: boolean; force?: boolean } = {}): Promise<ReviewRunReference> {
+    this.aiRuns.push({ reviewRunId, options });
+    return { runId: reviewRunId, status: 'completed', summary: 'AI review complete' };
+  }
+  async postAiReview(reviewRunId: string, input: { includeOverview: boolean; findingIds: string[] }): Promise<AiReviewPostResponse> {
+    this.aiPosts.push({ reviewRunId, input });
+    return { items: [{ findingId: null, gitlabDiscussionId: 'discussion-ai', gitlabNoteId: 'note-ai', skipped: false }] };
+  }
   async addOverviewDiscussion(_reviewRunId: string, _input: CreateOverviewDiscussion): Promise<GitLabDiscussionActionResponse> {
     return { gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-1', resolved: false };
   }
@@ -199,7 +210,7 @@ describe('API', () => {
     const created = await app.inject({ method: 'POST', url: '/api/instances', payload: { name: 'Team', baseUrl: 'https://gitlab.example.com', accessToken: 'secret' } });
     const response = await app.inject({ method: 'POST', url: '/api/reviews', payload: { instanceId: created.json().id, mergeRequestUrl: 'https://gitlab.example.com/group/project/-/merge_requests/7' } });
     expect(response.statusCode).toBe(202);
-    expect(response.json()).toMatchObject({ status: 'completed', summary: 'GitLab ingestion complete; AI review pending Slice 3' });
+    expect(response.json()).toMatchObject({ status: 'completed', summary: 'GitLab ingestion complete' });
     expect(gitlabReview.submissions).toHaveLength(1);
     await app.close();
   });
@@ -246,12 +257,28 @@ describe('API', () => {
     await app.close();
   });
 
+  it('exposes AI review run and posting endpoints', async () => {
+    const { app, gitlabReview } = await setup();
+    const runId = randomUUID();
+    const findingId = randomUUID();
+    const run = await app.inject({ method: 'POST', url: `/api/reviews/${runId}/ai-review`, payload: { force: true, autoPost: true } });
+    expect(run.statusCode).toBe(202);
+    expect(run.json()).toMatchObject({ runId, status: 'completed', summary: 'AI review complete' });
+    expect(gitlabReview.aiRuns).toEqual([{ reviewRunId: runId, options: { force: true, autoPost: true } }]);
+
+    const post = await app.inject({ method: 'POST', url: `/api/reviews/${runId}/ai-review/post`, payload: { includeOverview: true, findingIds: [findingId] } });
+    expect(post.statusCode).toBe(201);
+    expect(post.json()).toMatchObject({ items: [{ gitlabDiscussionId: 'discussion-ai', skipped: false }] });
+    expect(gitlabReview.aiPosts).toEqual([{ reviewRunId: runId, input: { includeOverview: true, findingIds: [findingId] } }]);
+    await app.close();
+  });
+
   it('serves persisted review detail through the detail contract', async () => {
     const { app, store } = await setup();
     const now = new Date().toISOString();
     const id = randomUUID();
     store.review = {
-      run: { id, mergeRequestId: randomUUID(), status: 'completed', sourceSha: 'abc123', summary: null, errorMessage: null, startedAt: now, completedAt: now, createdAt: now, updatedAt: now },
+      run: { id, mergeRequestId: randomUUID(), status: 'completed', sourceSha: 'abc123', summary: null, errorMessage: null, aiModel: null, overviewCommentBody: null, startedAt: now, completedAt: now, createdAt: now, updatedAt: now },
       files: [], hunks: [], findings: [], discussions: [], comments: [], chatMessages: []
     };
     const response = await app.inject({ method: 'GET', url: `/api/reviews/${id}` });

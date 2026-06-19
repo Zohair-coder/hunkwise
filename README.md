@@ -1,6 +1,6 @@
 # Hunkwise
 
-Hunkwise is a self-hosted GitLab code-review workspace. Slice 2 adds real self-hosted GitLab connectivity and merge-request ingestion on top of the Slice 1 production foundation. AI review execution is intentionally unavailable until Slice 3; ingested runs complete with the summary `GitLab ingestion complete; AI review pending Slice 3`.
+Hunkwise is a self-hosted GitLab code-review workspace. Slice 3 adds an OpenAI-backed review agent on top of the GitLab ingestion foundation: merge requests can be ingested, reviewed into structured findings, and selectively posted back to GitLab with duplicate suppression.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ apps/api  ───────► packages/contracts
 
 - `packages/contracts`: Zod request/domain schemas shared by API and UI.
 - `packages/db`: a small `pg` store interface, PostgreSQL implementation, and ordered SQL migrations.
-- `apps/api`: Fastify composition root, REST routes, AES-256-GCM secret boundary, GitLab REST client, MR ingestion service, webhook receiver, and health checks.
+- `apps/api`: Fastify composition root, REST routes, AES-256-GCM secret boundary, GitLab REST client, MR ingestion service, OpenAI review adapter, webhook receiver, and health checks.
 - `apps/web`: React/Vite landing page and responsive three-column review workspace.
 
 GitLab tokens cross the API only on instance create/update. They are encrypted before the store receives them, using a versioned AES-256-GCM envelope with a random nonce. Responses expose only `hasAccessToken`. A separate `InstanceSecretStore` capability and `InstanceCredentialProvider` form the narrow retrieval/decryption boundary for the outbound GitLab adapter; public DTOs never carry tokens and request errors do not include token values. Back up `APP_ENCRYPTION_KEY` securely; changing it makes existing credentials unreadable. Production deployments should inject it from a secret manager.
@@ -29,6 +29,7 @@ npm install
 cp .env.example .env
 # Set DATABASE_URL, DATABASE_SSL_MODE, and generate APP_ENCRYPTION_KEY with: openssl rand -base64 32
 # Set GITLAB_WEBHOOK_SECRET if you want to receive GitLab webhooks locally.
+# Set OPENAI_API_KEY to run AI reviews; OPENAI_MODEL defaults to gpt-4.1-mini.
 set -a && source .env && set +a
 npm run db:migrate
 npm run dev
@@ -62,6 +63,38 @@ curl -X POST http://localhost:3000/api/reviews \
 
 Merge request URLs must use `/namespace/project/-/merge_requests/:iid`; nested groups and instance path prefixes are supported. URLs with credentials, query strings, fragments, mismatched instances, or ambiguous project paths are rejected with structured `400` responses.
 
+## OpenAI review flow
+
+Set `OPENAI_API_KEY` in the process environment to enable AI reviews. The API never logs, persists, or returns the key. `OPENAI_MODEL` is optional and defaults to `gpt-4.1-mini`.
+
+Run AI review after ingestion:
+
+```bash
+curl -X POST http://localhost:3000/api/reviews/00000000-0000-4000-8000-000000000000/ai-review \
+  -H 'content-type: application/json' \
+  -d '{"force":true}'
+```
+
+Or request review during submission:
+
+```bash
+curl -X POST http://localhost:3000/api/reviews \
+  -H 'content-type: application/json' \
+  -d '{"instanceId":"00000000-0000-4000-8000-000000000000","mergeRequestUrl":"https://gitlab.example.com/group/project/-/merge_requests/7","runAi":true}'
+```
+
+The review agent includes bounded MR metadata, diff hunks, line maps, and existing GitLab discussions in the prompt. Diff context is deterministically truncated and common token/API-key patterns are redacted before model submission. Invalid or unparseable model output marks the run failed with a sanitized error instead of crashing the API.
+
+Fetch the result with `GET /api/reviews/:id`; findings include category, severity, confidence, rationale, file/line range, suggested fix, postability, and GitLab position metadata when an inline comment can be grounded. Post selected output back to GitLab:
+
+```bash
+curl -X POST http://localhost:3000/api/reviews/00000000-0000-4000-8000-000000000000/ai-review/post \
+  -H 'content-type: application/json' \
+  -d '{"includeOverview":true,"findingIds":["11111111-1111-4111-8111-111111111111"]}'
+```
+
+Posting stores GitLab discussion/note IDs and idempotency keys, so re-running the same post request skips already-published overview and finding comments. For manual smoke against a real model, export `OPENAI_API_KEY` in your shell and run the `ai-review` endpoint above; do not put the key in curl payloads or command output.
+
 For webhooks, set `GITLAB_WEBHOOK_SECRET` and configure GitLab's Secret token to the same value. Send Merge Request Hook and Note Hook events to:
 
 ```text
@@ -75,6 +108,7 @@ Webhook events are deduplicated per instance using `X-Gitlab-Event-UUID` when pr
 ```bash
 export APP_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 export GITLAB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+# Optional: export OPENAI_API_KEY from a secret manager or shell prompt.
 docker compose up --build
 ```
 
@@ -95,8 +129,10 @@ As of June 19, 2026, the full development dependency audit reports the low-sever
 | `POST` | `/api/instances/:id/test` | Test stored GitLab credentials against `/api/v4/user` and `/api/v4/version` |
 | `GET` | `/api/reviews?limit=&offset=` | Paginated review-run list |
 | `GET` | `/api/reviews/:id` | Snapshot-consistent run, files, hunks, findings, discussions, comments, and chat detail |
-| `POST` | `/api/reviews` | Ingest GitLab MR metadata, diffs, and discussions; returns a completed Slice 2 run |
+| `POST` | `/api/reviews` | Ingest GitLab MR metadata, diffs, and discussions; optional `runAi` and `autoPost` flags trigger Slice 3 review/posting |
 | `POST` | `/api/reviews/:id/refresh` | Refresh the review's MR from GitLab; idempotent for the current head SHA |
+| `POST` | `/api/reviews/:id/ai-review` | Run or re-run the OpenAI review agent for an ingested MR |
+| `POST` | `/api/reviews/:id/ai-review/post` | Post selected AI overview/finding comments back to GitLab idempotently |
 | `POST` | `/api/reviews/:id/gitlab/discussions` | Add an overview MR discussion |
 | `POST` | `/api/reviews/:id/gitlab/diff-discussions` | Add a positioned diff discussion |
 | `POST` | `/api/gitlab/discussions/:id/notes` | Reply to an imported/published GitLab discussion |
@@ -113,4 +149,4 @@ All errors, including readiness failures, malformed JSON, body-limit failures, a
 - GitLab client calls use timeouts, retry/backoff for `429` and `5xx`, Link/`X-Next-Page` pagination, and sanitized typed errors.
 - Idle PostgreSQL pool errors are handled without terminating the API. Liveness remains process-only; readiness reports database outages and recovers when PostgreSQL returns.
 - Keep TLS termination in front of the service. Configure PostgreSQL TLS in hosted deployments; the application rejects invalid certificates for non-Compose production database URLs.
-- No OpenAI credential is read, documented, or required in this slice.
+- `OPENAI_API_KEY` is read only by the OpenAI adapter when configured. It is never stored in domain tables, returned by REST endpoints, or intentionally logged.

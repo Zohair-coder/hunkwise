@@ -12,7 +12,10 @@ import type {
   ReviewDetail,
   ReviewList,
   ReviewRun,
-  ReviewRunReference
+  ReviewRunReference,
+  GitLabPosition,
+  FindingCategory,
+  FindingSeverity
 } from '@hunkwise/contracts';
 export { databaseSslModes, parseDatabaseSslMode, postgresSsl, type DatabaseSslMode } from './ssl.js';
 
@@ -120,6 +123,11 @@ export interface GitLabReviewContext {
   projectGitlabId: number;
   projectPathWithNamespace: string;
   mergeRequestIid: number;
+  mergeRequestTitle: string;
+  sourceBranch: string;
+  targetBranch: string;
+  sourceSha: string;
+  targetSha: string;
   mergeRequestUrl: string;
 }
 
@@ -168,6 +176,52 @@ export interface GitLabReviewStore {
   failGitLabWebhook(eventId: string, error: Error): Promise<void>;
 }
 
+export interface AiReviewFindingRecord {
+  aiFindingKey: string;
+  diffHunkId: string | null;
+  severity: FindingSeverity;
+  category: FindingCategory;
+  title: string;
+  rationale: string;
+  filePath: string;
+  line: number | null;
+  lineEnd: number | null;
+  confidence: number;
+  suggestedFix: string | null;
+  shouldPost: boolean;
+  gitlabPosition: GitLabPosition | null;
+}
+
+export interface CompleteAiReviewInput {
+  reviewRunId: string;
+  model: string;
+  summary: string;
+  overviewCommentBody: string;
+  findings: AiReviewFindingRecord[];
+}
+
+export interface PostAiFindingInput {
+  reviewRunId: string;
+  findingId: string;
+  gitlabDiscussionId: string;
+  gitlabNoteId: string | null;
+}
+
+export interface RecordAiOverviewPostInput {
+  reviewRunId: string;
+  gitlabDiscussionId: string;
+  gitlabNoteId: string | null;
+  body: string;
+}
+
+export interface AiReviewStore {
+  startAiReview(reviewRunId: string): Promise<void>;
+  completeAiReview(input: CompleteAiReviewInput): Promise<void>;
+  failAiReview(reviewRunId: string, error: Error): Promise<void>;
+  recordAiFindingPosted(input: PostAiFindingInput): Promise<void>;
+  recordAiOverviewPosted(input: RecordAiOverviewPostInput): Promise<void>;
+}
+
 interface InstanceRow {
   id: string;
   name: string;
@@ -184,6 +238,8 @@ interface ReviewRow {
   source_sha: string;
   summary: string | null;
   error_message: string | null;
+  ai_model: string | null;
+  overview_comment_body: string | null;
   started_at: Date | null;
   completed_at: Date | null;
   created_at: Date;
@@ -192,11 +248,44 @@ interface ReviewRow {
 
 interface DiffFileRow { id: string; review_run_id: string; old_path: string | null; new_path: string; status: DiffFile['status']; additions: number; deletions: number }
 interface DiffHunkRow { id: string; diff_file_id: string; old_start: number; old_lines: number; new_start: number; new_lines: number; header: string; patch: string; position: number }
-interface FindingRow { id: string; review_run_id: string; diff_hunk_id: string | null; severity: Finding['severity']; category: string; title: string; body: string; file_path: string; line: number | null; confidence: string; status: Finding['status']; created_at: Date }
+interface FindingRow {
+  id: string;
+  review_run_id: string;
+  diff_hunk_id: string | null;
+  severity: Finding['severity'];
+  category: Finding['category'];
+  title: string;
+  body: string;
+  file_path: string;
+  line: number | null;
+  line_end: number | null;
+  confidence: string;
+  suggested_fix: string | null;
+  should_post: boolean;
+  gitlab_position: GitLabPosition | null;
+  gitlab_discussion_id: string | null;
+  gitlab_note_id: string | null;
+  posted_at: Date | null;
+  status: Finding['status'];
+  created_at: Date;
+}
 interface DiscussionRow { id: string; review_run_id: string; finding_id: string | null; gitlab_discussion_id: string | null; resolved: boolean; created_at: Date }
 interface CommentRow { id: string; discussion_id: string; author_type: Comment['authorType']; author_name: string; body: string; gitlab_note_id: string | null; created_at: Date }
 interface ChatMessageRow { id: string; review_run_id: string; role: ChatMessage['role']; content: string; created_at: Date }
-interface ReviewContextRow { review_run_id: string; instance_id: string; instance_base_url: string; project_gitlab_id: string; project_path_with_namespace: string; merge_request_iid: number; merge_request_url: string }
+interface ReviewContextRow {
+  review_run_id: string;
+  instance_id: string;
+  instance_base_url: string;
+  project_gitlab_id: string;
+  project_path_with_namespace: string;
+  merge_request_iid: number;
+  merge_request_title: string;
+  source_branch: string;
+  target_branch: string;
+  source_sha: string;
+  target_sha: string;
+  merge_request_url: string;
+}
 interface DiscussionContextRow extends ReviewContextRow { local_discussion_id: string; gitlab_discussion_id: string }
 
 const iso = (value: Date): string => value.toISOString();
@@ -216,6 +305,8 @@ const mapReview = (row: ReviewRow): ReviewRun => ({
   sourceSha: row.source_sha,
   summary: row.summary,
   errorMessage: row.error_message,
+  aiModel: row.ai_model,
+  overviewCommentBody: row.overview_comment_body,
   startedAt: row.started_at ? iso(row.started_at) : null,
   completedAt: row.completed_at ? iso(row.completed_at) : null,
   createdAt: iso(row.created_at),
@@ -224,7 +315,28 @@ const mapReview = (row: ReviewRow): ReviewRun => ({
 
 const mapDiffFile = (row: DiffFileRow): DiffFile => ({ id: row.id, reviewRunId: row.review_run_id, oldPath: row.old_path, newPath: row.new_path, status: row.status, additions: row.additions, deletions: row.deletions });
 const mapDiffHunk = (row: DiffHunkRow): DiffHunk => ({ id: row.id, diffFileId: row.diff_file_id, oldStart: row.old_start, oldLines: row.old_lines, newStart: row.new_start, newLines: row.new_lines, header: row.header, patch: row.patch, position: row.position });
-const mapFinding = (row: FindingRow): Finding => ({ id: row.id, reviewRunId: row.review_run_id, diffHunkId: row.diff_hunk_id, severity: row.severity, category: row.category, title: row.title, body: row.body, filePath: row.file_path, line: row.line, confidence: Number(row.confidence), status: row.status, createdAt: iso(row.created_at) });
+const mapFinding = (row: FindingRow): Finding => ({
+  id: row.id,
+  reviewRunId: row.review_run_id,
+  diffHunkId: row.diff_hunk_id,
+  severity: row.severity,
+  category: row.category,
+  title: row.title,
+  body: row.body,
+  rationale: row.body,
+  filePath: row.file_path,
+  line: row.line,
+  lineEnd: row.line_end,
+  confidence: Number(row.confidence),
+  suggestedFix: row.suggested_fix,
+  shouldPost: row.should_post,
+  gitlabPosition: row.gitlab_position,
+  gitlabDiscussionId: row.gitlab_discussion_id,
+  gitlabNoteId: row.gitlab_note_id,
+  postedAt: row.posted_at ? iso(row.posted_at) : null,
+  status: row.status,
+  createdAt: iso(row.created_at)
+});
 const mapDiscussion = (row: DiscussionRow): Discussion => ({ id: row.id, reviewRunId: row.review_run_id, findingId: row.finding_id, gitlabDiscussionId: row.gitlab_discussion_id, resolved: row.resolved, createdAt: iso(row.created_at) });
 const mapComment = (row: CommentRow): Comment => ({ id: row.id, discussionId: row.discussion_id, authorType: row.author_type, authorName: row.author_name, body: row.body, gitlabNoteId: row.gitlab_note_id, createdAt: iso(row.created_at) });
 const mapChatMessage = (row: ChatMessageRow): ChatMessage => ({ id: row.id, reviewRunId: row.review_run_id, role: row.role, content: row.content, createdAt: iso(row.created_at) });
@@ -233,7 +345,14 @@ const rollback = async (client: PoolClient): Promise<void> => {
   await client.query('ROLLBACK').catch(() => undefined);
 };
 
-export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLabReviewStore {
+const sanitizePersistedError = (message: string): string =>
+  message
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
+    .replace(/glpat-[A-Za-z0-9_-]{4,}/g, '[redacted]')
+    .replace(/(api[_-]?key|access[_-]?token|private[_-]?token|authorization)(["'\s:=]+)[^"'\s,}]+/gi, '$1$2[redacted]')
+    .slice(0, 2000);
+
+export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLabReviewStore, AiReviewStore {
   readonly #pool: Pool;
   readonly #poolErrorHandler: (error: Error) => void;
 
@@ -322,7 +441,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       const count = await client.query<{ count: string }>('SELECT count(*)::text AS count FROM review_runs');
       const rows = await client.query<ReviewRow>(
-        `SELECT id, merge_request_id, status, source_sha, summary, error_message,
+        `SELECT id, merge_request_id, status, source_sha, summary, error_message, ai_model, overview_comment_body,
                 started_at, completed_at, created_at, updated_at
          FROM review_runs ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`,
         [page.limit, page.offset]
@@ -342,7 +461,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       const runResult = await client.query<ReviewRow>(
-        `SELECT id, merge_request_id, status, source_sha, summary, error_message,
+        `SELECT id, merge_request_id, status, source_sha, summary, error_message, ai_model, overview_comment_body,
                 started_at, completed_at, created_at, updated_at
          FROM review_runs WHERE id = $1`, [id]
       );
@@ -353,7 +472,13 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       }
       const files = await client.query<DiffFileRow>('SELECT id, review_run_id, old_path, new_path, status, additions, deletions FROM diff_files WHERE review_run_id = $1 ORDER BY new_path, id', [id]);
       const hunks = await client.query<DiffHunkRow>('SELECT h.id, h.diff_file_id, h.old_start, h.old_lines, h.new_start, h.new_lines, h.header, h.patch, h.position FROM diff_hunks h JOIN diff_files f ON f.id = h.diff_file_id WHERE f.review_run_id = $1 ORDER BY f.new_path, h.position, h.id', [id]);
-      const findings = await client.query<FindingRow>('SELECT id, review_run_id, diff_hunk_id, severity, category, title, body, file_path, line, confidence::text, status, created_at FROM findings WHERE review_run_id = $1 ORDER BY created_at, id', [id]);
+      const findings = await client.query<FindingRow>(
+        `SELECT id, review_run_id, diff_hunk_id, severity, category, title, body, file_path, line,
+                line_end, confidence::text, suggested_fix, should_post, gitlab_position,
+                gitlab_discussion_id, gitlab_note_id, posted_at, status, created_at
+         FROM findings WHERE review_run_id = $1 ORDER BY created_at, id`,
+        [id]
+      );
       const discussions = await client.query<DiscussionRow>('SELECT id, review_run_id, finding_id, gitlab_discussion_id, resolved, created_at FROM discussions WHERE review_run_id = $1 ORDER BY created_at, id', [id]);
       const comments = await client.query<CommentRow>('SELECT c.id, c.discussion_id, c.author_type, c.author_name, c.body, c.gitlab_note_id, c.created_at FROM comments c JOIN discussions d ON d.id = c.discussion_id WHERE d.review_run_id = $1 ORDER BY c.created_at, c.id', [id]);
       const chatMessages = await client.query<ChatMessageRow>('SELECT id, review_run_id, role, content, created_at FROM chat_messages WHERE review_run_id = $1 ORDER BY created_at, id', [id]);
@@ -418,13 +543,24 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       const existing = await client.query<Pick<ReviewRow, 'id' | 'status' | 'summary'>>(
         `SELECT id, status, summary
          FROM review_runs
-         WHERE merge_request_id = $1 AND source_sha = $2 AND status = 'completed'
+         WHERE merge_request_id = $1 AND source_sha = $2 AND status <> 'running'
          ORDER BY created_at DESC, id DESC
          LIMIT 1`,
         [mergeRequestId, input.mergeRequest.sourceSha]
       );
       const existingRun = existing.rows[0];
       if (existingRun) {
+        const refreshed = await client.query<Pick<ReviewRow, 'id' | 'status' | 'summary'>>(
+          `UPDATE review_runs
+           SET status = 'completed',
+               summary = $2,
+               error_message = NULL,
+               completed_at = now(),
+               updated_at = now()
+           WHERE id = $1
+           RETURNING id, status, summary`,
+          [existingRun.id, input.summary]
+        );
         for (const discussion of input.discussions) {
           const discussionRow = await client.query<{ id: string }>(
             `INSERT INTO discussions (review_run_id, gitlab_discussion_id, resolved)
@@ -446,7 +582,9 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
           }
         }
         await client.query('COMMIT');
-        return { runId: existingRun.id, status: existingRun.status, summary: existingRun.summary };
+        const row = refreshed.rows[0];
+        if (!row) throw new Error('Review run refresh returned no row');
+        return { runId: row.id, status: row.status, summary: row.summary };
       }
 
       const run = await client.query<Pick<ReviewRow, 'id' | 'status' | 'summary'>>(
@@ -524,6 +662,11 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
               p.gitlab_id::text AS project_gitlab_id,
               p.path_with_namespace AS project_path_with_namespace,
               mr.gitlab_iid AS merge_request_iid,
+              mr.title AS merge_request_title,
+              mr.source_branch,
+              mr.target_branch,
+              mr.source_sha,
+              mr.target_sha,
               mr.web_url AS merge_request_url
        FROM review_runs r
        JOIN merge_requests mr ON mr.id = r.merge_request_id
@@ -540,6 +683,11 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       projectGitlabId: Number(row.project_gitlab_id),
       projectPathWithNamespace: row.project_path_with_namespace,
       mergeRequestIid: row.merge_request_iid,
+      mergeRequestTitle: row.merge_request_title,
+      sourceBranch: row.source_branch,
+      targetBranch: row.target_branch,
+      sourceSha: row.source_sha,
+      targetSha: row.target_sha,
       mergeRequestUrl: row.merge_request_url
     } : null;
   }
@@ -552,6 +700,11 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
               p.gitlab_id::text AS project_gitlab_id,
               p.path_with_namespace AS project_path_with_namespace,
               mr.gitlab_iid AS merge_request_iid,
+              mr.title AS merge_request_title,
+              mr.source_branch,
+              mr.target_branch,
+              mr.source_sha,
+              mr.target_sha,
               mr.web_url AS merge_request_url,
               d.id AS local_discussion_id,
               d.gitlab_discussion_id
@@ -571,6 +724,11 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       projectGitlabId: Number(row.project_gitlab_id),
       projectPathWithNamespace: row.project_path_with_namespace,
       mergeRequestIid: row.merge_request_iid,
+      mergeRequestTitle: row.merge_request_title,
+      sourceBranch: row.source_branch,
+      targetBranch: row.target_branch,
+      sourceSha: row.source_sha,
+      targetSha: row.target_sha,
       mergeRequestUrl: row.merge_request_url,
       localDiscussionId: row.local_discussion_id,
       gitlabDiscussionId: row.gitlab_discussion_id
@@ -618,6 +776,177 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
 
   async updateGitLabDiscussionResolved(localDiscussionId: string, resolved: boolean): Promise<void> {
     await this.#pool.query('UPDATE discussions SET resolved = $2 WHERE id = $1', [localDiscussionId, resolved]);
+  }
+
+  async startAiReview(reviewRunId: string): Promise<void> {
+    const result = await this.#pool.query(
+      `UPDATE review_runs
+       SET status = 'running',
+           error_message = NULL,
+           started_at = COALESCE(started_at, now()),
+           completed_at = NULL,
+           updated_at = now()
+       WHERE id = $1`,
+      [reviewRunId]
+    );
+    if ((result.rowCount ?? 0) === 0) throw new Error('Review run not found');
+  }
+
+  async completeAiReview(input: CompleteAiReviewInput): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `DELETE FROM findings
+         WHERE review_run_id = $1
+           AND gitlab_discussion_id IS NULL
+           AND id NOT IN (
+             SELECT finding_id FROM discussions WHERE review_run_id = $1 AND finding_id IS NOT NULL AND gitlab_discussion_id IS NOT NULL
+           )`,
+        [input.reviewRunId]
+      );
+
+      for (const finding of input.findings) {
+        await client.query(
+          `INSERT INTO findings (
+             review_run_id, diff_hunk_id, severity, category, title, body, file_path, line, line_end,
+             confidence, suggested_fix, should_post, ai_finding_key, gitlab_position
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+           ON CONFLICT (review_run_id, ai_finding_key) WHERE ai_finding_key IS NOT NULL DO UPDATE
+           SET diff_hunk_id = EXCLUDED.diff_hunk_id,
+               severity = EXCLUDED.severity,
+               category = EXCLUDED.category,
+               title = EXCLUDED.title,
+               body = EXCLUDED.body,
+               file_path = EXCLUDED.file_path,
+               line = EXCLUDED.line,
+               line_end = EXCLUDED.line_end,
+               confidence = EXCLUDED.confidence,
+               suggested_fix = EXCLUDED.suggested_fix,
+               should_post = EXCLUDED.should_post,
+               gitlab_position = EXCLUDED.gitlab_position`,
+          [
+            input.reviewRunId,
+            finding.diffHunkId,
+            finding.severity,
+            finding.category,
+            finding.title,
+            finding.rationale,
+            finding.filePath,
+            finding.line,
+            finding.lineEnd,
+            finding.confidence,
+            finding.suggestedFix,
+            finding.shouldPost,
+            finding.aiFindingKey,
+            finding.gitlabPosition === null ? null : JSON.stringify(finding.gitlabPosition)
+          ]
+        );
+      }
+
+      const result = await client.query(
+        `UPDATE review_runs
+         SET status = 'completed',
+             summary = $2,
+             error_message = NULL,
+             ai_model = $3,
+             overview_comment_body = $4,
+             completed_at = now(),
+             updated_at = now()
+         WHERE id = $1`,
+        [input.reviewRunId, input.summary, input.model, input.overviewCommentBody]
+      );
+      if ((result.rowCount ?? 0) === 0) throw new Error('Review run not found');
+      await client.query('COMMIT');
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async failAiReview(reviewRunId: string, error: Error): Promise<void> {
+    const message = sanitizePersistedError(error.message);
+    const result = await this.#pool.query(
+      `UPDATE review_runs
+       SET status = 'failed',
+           error_message = $2,
+           completed_at = now(),
+           updated_at = now()
+       WHERE id = $1`,
+      [reviewRunId, message]
+    );
+    if ((result.rowCount ?? 0) === 0) throw new Error('Review run not found');
+  }
+
+  async recordAiFindingPosted(input: PostAiFindingInput): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE findings
+         SET gitlab_discussion_id = $3,
+             gitlab_note_id = $4,
+             posted_at = COALESCE(posted_at, now()),
+             post_error = NULL
+         WHERE review_run_id = $1 AND id = $2`,
+        [input.reviewRunId, input.findingId, input.gitlabDiscussionId, input.gitlabNoteId]
+      );
+      const discussion = await client.query<{ id: string }>(
+        `INSERT INTO discussions (review_run_id, finding_id, gitlab_discussion_id, resolved, idempotency_key)
+         VALUES ($1, $2, $3, false, $4)
+         ON CONFLICT (review_run_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE
+         SET gitlab_discussion_id = EXCLUDED.gitlab_discussion_id
+         RETURNING id`,
+        [input.reviewRunId, input.findingId, input.gitlabDiscussionId, `ai-finding:${input.findingId}`]
+      );
+      const discussionId = discussion.rows[0]?.id;
+      if (!discussionId) throw new Error('AI discussion insert returned no row');
+      await client.query(
+        `INSERT INTO comments (discussion_id, author_type, author_name, body, gitlab_note_id)
+         SELECT $1, 'hunkwise', 'Hunkwise', body, $3
+         FROM findings WHERE review_run_id = $2 AND id = $4
+         ON CONFLICT (discussion_id, gitlab_note_id) WHERE gitlab_note_id IS NOT NULL DO NOTHING`,
+        [discussionId, input.reviewRunId, input.gitlabNoteId, input.findingId]
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordAiOverviewPosted(input: RecordAiOverviewPostInput): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const discussion = await client.query<{ id: string }>(
+        `INSERT INTO discussions (review_run_id, gitlab_discussion_id, resolved, idempotency_key)
+         VALUES ($1, $2, false, 'ai-overview')
+         ON CONFLICT (review_run_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE
+         SET gitlab_discussion_id = EXCLUDED.gitlab_discussion_id
+         RETURNING id`,
+        [input.reviewRunId, input.gitlabDiscussionId]
+      );
+      const discussionId = discussion.rows[0]?.id;
+      if (!discussionId) throw new Error('AI overview discussion insert returned no row');
+      await client.query(
+        `INSERT INTO comments (discussion_id, author_type, author_name, body, gitlab_note_id)
+         VALUES ($1, 'hunkwise', 'Hunkwise', $2, $3)
+         ON CONFLICT (discussion_id, gitlab_note_id) WHERE gitlab_note_id IS NOT NULL DO NOTHING`,
+        [discussionId, input.body, input.gitlabNoteId]
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async recordGitLabWebhook(input: RecordGitLabWebhookInput): Promise<RecordGitLabWebhookResult> {

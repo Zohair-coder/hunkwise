@@ -1,6 +1,7 @@
 import process from 'node:process';
 import { PostgresStore, postgresSsl } from '@hunkwise/db';
 import { buildApp } from './app.js';
+import { OpenAiReviewClient } from './ai-review.js';
 import { loadConfig } from './config.js';
 import { DecryptingInstanceCredentialProvider } from './credentials.js';
 import { AesGcmSecretCipher } from './crypto.js';
@@ -19,7 +20,10 @@ const app = await buildApp(
   {
     store,
     cipher,
-    gitlabReview: new GitLabReviewService(store, new DecryptingInstanceCredentialProvider(store, cipher)),
+    gitlabReview: new GitLabReviewService(store, new DecryptingInstanceCredentialProvider(store, cipher), {
+      aiModel: config.OPENAI_MODEL,
+      ...(config.OPENAI_API_KEY === undefined ? {} : { aiClient: new OpenAiReviewClient(config.OPENAI_API_KEY) })
+    }),
     ...(config.GITLAB_WEBHOOK_SECRET === undefined ? {} : { gitlabWebhookSecret: config.GITLAB_WEBHOOK_SECRET })
   },
   {

@@ -13,4 +13,11 @@ describe('database TLS configuration', () => {
     expect(loadConfig({ ...base, NODE_ENV: 'production', DATABASE_SSL_MODE: 'disable' }).DATABASE_SSL_MODE).toBe('disable');
     expect(() => loadConfig({ ...base, DATABASE_SSL_MODE: 'prefer' })).toThrow();
   });
+
+  it('defaults OpenAI model and keeps the API key optional', () => {
+    const withoutKey = loadConfig(base);
+    expect(withoutKey.OPENAI_MODEL).toBe('gpt-4.1-mini');
+    expect(withoutKey).not.toHaveProperty('OPENAI_API_KEY');
+    expect(loadConfig({ ...base, OPENAI_API_KEY: 'sk-test', OPENAI_MODEL: 'gpt-test' })).toMatchObject({ OPENAI_MODEL: 'gpt-test', OPENAI_API_KEY: 'sk-test' });
+  });
 });

@@ -35,13 +35,16 @@ Acceptance criteria:
 
 Implement the asynchronous review engine, prompt/model adapter, deterministic analyzers, and grounded findings.
 
+Status: implemented in this slice. The API can run an injectable OpenAI-backed review agent after GitLab MR ingestion, validate structured model output, persist findings and overview comments, re-run against existing ingested data, and post selected overview/finding comments back to GitLab idempotently.
+
 Acceptance criteria:
 
-- A durable worker claims runs safely, reports progress, retries transient failures, and supports cancellation.
-- Model credentials/config remain outside domain records; prompts exclude secrets and enforce bounded diff context.
-- Findings cite file/hunk/line, confidence, severity, and evidence; invalid or stale positions are rejected.
-- Runs produce summaries and persist auditable model/analyzer metadata without chain-of-thought.
-- Evaluation fixtures and failure-injection tests establish precision and recovery baselines.
+- `OPENAI_API_KEY` is read only by the model adapter; `OPENAI_MODEL` defaults to `gpt-4.1-mini`.
+- Prompts include MR metadata, bounded diff hunks, line maps, and existing GitLab discussions, with deterministic truncation and token/API-key redaction.
+- Model output is schema-validated into summaries, overview comments, and findings with category, severity, confidence, rationale, file/line range, suggested fix, and postability.
+- Invalid or unparseable model output marks the run failed with a sanitized error.
+- Posting selected findings/comments uses GitLab discussion endpoints and stores external IDs/idempotency keys to avoid duplicate comments.
+- Unit, API, DB, and contract tests cover prompt building, truncation/redaction, schema validation, duplicate suppression, GitLab position mapping, persistence, and mocked OpenAI/GitLab flows.
 
 ## Slice 4 — Collaboration and chat
 
@@ -49,7 +52,7 @@ Complete the interactive review workflow: finding disposition, GitLab discussion
 
 Acceptance criteria:
 
-- Users can filter/navigate findings, dismiss or mark fixed, and publish comments idempotently to GitLab.
+- Users can filter/navigate findings, dismiss or mark fixed, and manage the Slice 3 publishing flow in the UI.
 - Discussion resolution remains synchronized in both directions with conflict-safe updates.
 - Chat streams answers grounded in the selected run and cites relevant files/findings.
 - Authorization prevents cross-instance/project data access and all mutating actions are audited.

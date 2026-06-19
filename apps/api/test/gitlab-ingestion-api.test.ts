@@ -8,8 +8,11 @@ import type {
   GitLabReviewSnapshot,
   GitLabReviewStore,
   HunkwiseStore,
+  CompleteAiReviewInput,
   NewInstanceRecord,
+  PostAiFindingInput,
   RecordGitLabDiscussionInput,
+  RecordAiOverviewPostInput,
   RecordGitLabReplyInput,
   RecordGitLabWebhookInput,
   RecordGitLabWebhookResult,
@@ -59,6 +62,11 @@ class MemoryReviewStore implements HunkwiseStore, GitLabReviewStore {
   async recordGitLabDiscussion(_input: RecordGitLabDiscussionInput): Promise<{ localDiscussionId: string }> { return { localDiscussionId: randomUUID() }; }
   async recordGitLabReply(_input: RecordGitLabReplyInput): Promise<void> {}
   async updateGitLabDiscussionResolved(): Promise<void> {}
+  async startAiReview(): Promise<void> {}
+  async completeAiReview(_input: CompleteAiReviewInput): Promise<void> {}
+  async failAiReview(): Promise<void> {}
+  async recordAiFindingPosted(_input: PostAiFindingInput): Promise<void> {}
+  async recordAiOverviewPosted(_input: RecordAiOverviewPostInput): Promise<void> {}
   async recordGitLabWebhook(_input: RecordGitLabWebhookInput): Promise<RecordGitLabWebhookResult> {
     const key = `${_input.instanceId}:${_input.eventKey}`;
     const existing = this.webhookEvents.get(key);
@@ -175,7 +183,7 @@ describe('GitLab ingestion API', () => {
       payload: { instanceId: instance.json().id, mergeRequestUrl: `${baseUrl}/group/project/-/merge_requests/7` }
     });
     expect(response.statusCode).toBe(202);
-    expect(response.json()).toMatchObject({ status: 'completed', summary: 'GitLab ingestion complete; AI review pending Slice 3' });
+    expect(response.json()).toMatchObject({ status: 'completed', summary: 'GitLab ingestion complete' });
     expect(seenTokens.every((token) => token === 'glpat-secret')).toBe(true);
     expect(store.snapshots).toHaveLength(1);
     expect(store.snapshots[0]).toMatchObject({

@@ -13,6 +13,8 @@ const configSchema = z.object({
       return Buffer.from(value, 'base64').length === 32 && Buffer.from(value, 'base64').toString('base64') === value;
     } catch { return false; }
   }, 'Must be a base64-encoded 32-byte key'),
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  OPENAI_MODEL: z.string().min(1).default('gpt-4.1-mini'),
   GITLAB_WEBHOOK_SECRET: z.string().min(1).optional(),
   WEB_DIST_DIR: z.string().optional()
 });
