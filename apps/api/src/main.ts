@@ -2,8 +2,9 @@ import process from 'node:process';
 import { PostgresStore, postgresSsl } from '@hunkwise/db';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { DecryptingInstanceCredentialProvider } from './credentials.js';
 import { AesGcmSecretCipher } from './crypto.js';
-import { UnavailableGitLabGateway, UnavailableReviewEngine } from './services.js';
+import { GitLabReviewService } from './gitlab-review-service.js';
 
 const config = loadConfig();
 const store = new PostgresStore({
@@ -13,12 +14,13 @@ const store = new PostgresStore({
   connectionTimeoutMillis: 5_000,
   ssl: postgresSsl(config.DATABASE_SSL_MODE)
 });
+const cipher = new AesGcmSecretCipher(config.APP_ENCRYPTION_KEY);
 const app = await buildApp(
   {
     store,
-    cipher: new AesGcmSecretCipher(config.APP_ENCRYPTION_KEY),
-    gitlab: new UnavailableGitLabGateway(),
-    reviewEngine: new UnavailableReviewEngine()
+    cipher,
+    gitlabReview: new GitLabReviewService(store, new DecryptingInstanceCredentialProvider(store, cipher)),
+    ...(config.GITLAB_WEBHOOK_SECRET === undefined ? {} : { gitlabWebhookSecret: config.GITLAB_WEBHOOK_SECRET })
   },
   {
     logger: { level: config.LOG_LEVEL },

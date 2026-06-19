@@ -11,7 +11,8 @@ import type {
   Pagination,
   ReviewDetail,
   ReviewList,
-  ReviewRun
+  ReviewRun,
+  ReviewRunReference
 } from '@hunkwise/contracts';
 export { databaseSslModes, parseDatabaseSslMode, postgresSsl, type DatabaseSslMode } from './ssl.js';
 
@@ -51,6 +52,119 @@ export interface InstanceSecretStore {
   getEncryptedInstanceAccessToken(instanceId: string): Promise<EncryptedSecret | null>;
 }
 
+export interface GitLabProjectSnapshot {
+  gitlabId: number;
+  pathWithNamespace: string;
+  defaultBranch: string | null;
+  webUrl: string;
+}
+
+export interface GitLabMergeRequestSnapshot {
+  gitlabIid: number;
+  title: string;
+  authorUsername: string;
+  sourceBranch: string;
+  targetBranch: string;
+  sourceSha: string;
+  targetSha: string;
+  state: 'open' | 'merged' | 'closed';
+  webUrl: string;
+}
+
+export interface GitLabDiffHunkSnapshot {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  header: string;
+  patch: string;
+  position: number;
+}
+
+export interface GitLabDiffFileSnapshot {
+  oldPath: string | null;
+  newPath: string;
+  status: DiffFile['status'];
+  additions: number;
+  deletions: number;
+  hunks: GitLabDiffHunkSnapshot[];
+}
+
+export interface GitLabCommentSnapshot {
+  authorType: Comment['authorType'];
+  authorName: string;
+  body: string;
+  gitlabNoteId: string | null;
+  createdAt?: string;
+}
+
+export interface GitLabDiscussionSnapshot {
+  gitlabDiscussionId: string;
+  resolved: boolean;
+  comments: GitLabCommentSnapshot[];
+}
+
+export interface GitLabReviewSnapshot {
+  instanceId: string;
+  project: GitLabProjectSnapshot;
+  mergeRequest: GitLabMergeRequestSnapshot;
+  files: GitLabDiffFileSnapshot[];
+  discussions: GitLabDiscussionSnapshot[];
+  summary: string;
+}
+
+export interface GitLabReviewContext {
+  reviewRunId: string;
+  instanceId: string;
+  instanceBaseUrl: string;
+  projectGitlabId: number;
+  projectPathWithNamespace: string;
+  mergeRequestIid: number;
+  mergeRequestUrl: string;
+}
+
+export interface GitLabDiscussionContext extends GitLabReviewContext {
+  localDiscussionId: string;
+  gitlabDiscussionId: string;
+}
+
+export interface RecordGitLabDiscussionInput {
+  reviewRunId: string;
+  gitlabDiscussionId: string;
+  resolved: boolean;
+  comment: GitLabCommentSnapshot;
+}
+
+export interface RecordGitLabReplyInput {
+  localDiscussionId: string;
+  authorName: string;
+  body: string;
+  gitlabNoteId: string | null;
+}
+
+export interface RecordGitLabWebhookInput {
+  instanceId: string;
+  eventKey: string;
+  eventType: string;
+  payload: unknown;
+}
+
+export interface RecordGitLabWebhookResult {
+  duplicate: boolean;
+  eventId: string;
+}
+
+export interface GitLabReviewStore {
+  upsertGitLabReviewSnapshot(input: GitLabReviewSnapshot): Promise<ReviewRunReference>;
+  getReviewContext(reviewRunId: string): Promise<GitLabReviewContext | null>;
+  getDiscussionContext(localDiscussionId: string): Promise<GitLabDiscussionContext | null>;
+  recordGitLabDiscussion(input: RecordGitLabDiscussionInput): Promise<{ localDiscussionId: string }>;
+  recordGitLabReply(input: RecordGitLabReplyInput): Promise<void>;
+  updateGitLabDiscussionResolved(localDiscussionId: string, resolved: boolean): Promise<void>;
+  recordGitLabWebhook(input: RecordGitLabWebhookInput): Promise<RecordGitLabWebhookResult>;
+  completeGitLabWebhook(eventId: string, reviewRunId: string | null): Promise<void>;
+}
+
 interface InstanceRow {
   id: string;
   name: string;
@@ -79,6 +193,8 @@ interface FindingRow { id: string; review_run_id: string; diff_hunk_id: string |
 interface DiscussionRow { id: string; review_run_id: string; finding_id: string | null; gitlab_discussion_id: string | null; resolved: boolean; created_at: Date }
 interface CommentRow { id: string; discussion_id: string; author_type: Comment['authorType']; author_name: string; body: string; gitlab_note_id: string | null; created_at: Date }
 interface ChatMessageRow { id: string; review_run_id: string; role: ChatMessage['role']; content: string; created_at: Date }
+interface ReviewContextRow { review_run_id: string; instance_id: string; instance_base_url: string; project_gitlab_id: string; project_path_with_namespace: string; merge_request_iid: number; merge_request_url: string }
+interface DiscussionContextRow extends ReviewContextRow { local_discussion_id: string; gitlab_discussion_id: string }
 
 const iso = (value: Date): string => value.toISOString();
 const mapInstance = (row: InstanceRow): GitLabInstance => ({
@@ -114,7 +230,7 @@ const rollback = async (client: PoolClient): Promise<void> => {
   await client.query('ROLLBACK').catch(() => undefined);
 };
 
-export class PostgresStore implements HunkwiseStore, InstanceSecretStore {
+export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLabReviewStore {
   readonly #pool: Pool;
   readonly #poolErrorHandler: (error: Error) => void;
 
@@ -246,5 +362,279 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore {
     } finally {
       client.release();
     }
+  }
+
+  async upsertGitLabReviewSnapshot(input: GitLabReviewSnapshot): Promise<ReviewRunReference> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const project = await client.query<{ id: string }>(
+        `INSERT INTO projects (instance_id, gitlab_id, path_with_namespace, default_branch, web_url)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (instance_id, gitlab_id) DO UPDATE
+         SET path_with_namespace = EXCLUDED.path_with_namespace,
+             default_branch = EXCLUDED.default_branch,
+             web_url = EXCLUDED.web_url,
+             updated_at = now()
+         RETURNING id`,
+        [input.instanceId, input.project.gitlabId, input.project.pathWithNamespace, input.project.defaultBranch, input.project.webUrl]
+      );
+      const projectId = project.rows[0]?.id;
+      if (!projectId) throw new Error('Project upsert returned no row');
+
+      const mr = await client.query<{ id: string }>(
+        `INSERT INTO merge_requests (project_id, gitlab_iid, title, author_username, source_branch, target_branch, source_sha, target_sha, state, web_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (project_id, gitlab_iid) DO UPDATE
+         SET title = EXCLUDED.title,
+             author_username = EXCLUDED.author_username,
+             source_branch = EXCLUDED.source_branch,
+             target_branch = EXCLUDED.target_branch,
+             source_sha = EXCLUDED.source_sha,
+             target_sha = EXCLUDED.target_sha,
+             state = EXCLUDED.state,
+             web_url = EXCLUDED.web_url,
+             updated_at = now()
+         RETURNING id`,
+        [
+          projectId,
+          input.mergeRequest.gitlabIid,
+          input.mergeRequest.title,
+          input.mergeRequest.authorUsername,
+          input.mergeRequest.sourceBranch,
+          input.mergeRequest.targetBranch,
+          input.mergeRequest.sourceSha,
+          input.mergeRequest.targetSha,
+          input.mergeRequest.state,
+          input.mergeRequest.webUrl
+        ]
+      );
+      const mergeRequestId = mr.rows[0]?.id;
+      if (!mergeRequestId) throw new Error('Merge request upsert returned no row');
+
+      const existing = await client.query<Pick<ReviewRow, 'id' | 'status' | 'summary'>>(
+        `SELECT id, status, summary
+         FROM review_runs
+         WHERE merge_request_id = $1 AND source_sha = $2 AND status = 'completed'
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [mergeRequestId, input.mergeRequest.sourceSha]
+      );
+      const existingRun = existing.rows[0];
+      if (existingRun) {
+        for (const discussion of input.discussions) {
+          const discussionRow = await client.query<{ id: string }>(
+            `INSERT INTO discussions (review_run_id, gitlab_discussion_id, resolved)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (review_run_id, gitlab_discussion_id) WHERE gitlab_discussion_id IS NOT NULL DO UPDATE
+             SET resolved = EXCLUDED.resolved
+             RETURNING id`,
+            [existingRun.id, discussion.gitlabDiscussionId, discussion.resolved]
+          );
+          const discussionId = discussionRow.rows[0]?.id;
+          if (!discussionId) throw new Error('Discussion insert returned no row');
+          for (const comment of discussion.comments) {
+            await client.query(
+              `INSERT INTO comments (discussion_id, author_type, author_name, body, gitlab_note_id, created_at)
+               VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()))
+               ON CONFLICT (discussion_id, gitlab_note_id) WHERE gitlab_note_id IS NOT NULL DO NOTHING`,
+              [discussionId, comment.authorType, comment.authorName, comment.body, comment.gitlabNoteId, comment.createdAt ?? null]
+            );
+          }
+        }
+        await client.query('COMMIT');
+        return { runId: existingRun.id, status: existingRun.status, summary: existingRun.summary };
+      }
+
+      const run = await client.query<Pick<ReviewRow, 'id' | 'status' | 'summary'>>(
+        `INSERT INTO review_runs (merge_request_id, status, source_sha, summary, started_at)
+         VALUES ($1, 'running', $2, $3, now())
+         RETURNING id, status, summary`,
+        [mergeRequestId, input.mergeRequest.sourceSha, input.summary]
+      );
+      const runId = run.rows[0]?.id;
+      if (!runId) throw new Error('Review run insert returned no row');
+
+      for (const file of input.files) {
+        const fileRow = await client.query<{ id: string }>(
+          `INSERT INTO diff_files (review_run_id, old_path, new_path, status, additions, deletions)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id`,
+          [runId, file.oldPath, file.newPath, file.status, file.additions, file.deletions]
+        );
+        const fileId = fileRow.rows[0]?.id;
+        if (!fileId) throw new Error('Diff file insert returned no row');
+        for (const hunk of file.hunks) {
+          await client.query(
+            `INSERT INTO diff_hunks (diff_file_id, review_run_id, old_start, old_lines, new_start, new_lines, header, patch, position)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [fileId, runId, hunk.oldStart, hunk.oldLines, hunk.newStart, hunk.newLines, hunk.header, hunk.patch, hunk.position]
+          );
+        }
+      }
+
+      for (const discussion of input.discussions) {
+        const discussionRow = await client.query<{ id: string }>(
+          `INSERT INTO discussions (review_run_id, gitlab_discussion_id, resolved)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (review_run_id, gitlab_discussion_id) WHERE gitlab_discussion_id IS NOT NULL DO UPDATE
+           SET resolved = EXCLUDED.resolved
+           RETURNING id`,
+          [runId, discussion.gitlabDiscussionId, discussion.resolved]
+        );
+        const discussionId = discussionRow.rows[0]?.id;
+        if (!discussionId) throw new Error('Discussion insert returned no row');
+        for (const comment of discussion.comments) {
+          await client.query(
+            `INSERT INTO comments (discussion_id, author_type, author_name, body, gitlab_note_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()))
+             ON CONFLICT (discussion_id, gitlab_note_id) WHERE gitlab_note_id IS NOT NULL DO NOTHING`,
+            [discussionId, comment.authorType, comment.authorName, comment.body, comment.gitlabNoteId, comment.createdAt ?? null]
+          );
+        }
+      }
+
+      const completed = await client.query<Pick<ReviewRow, 'id' | 'status' | 'summary'>>(
+        `UPDATE review_runs
+         SET status = 'completed', summary = $2, completed_at = now(), updated_at = now()
+         WHERE id = $1
+         RETURNING id, status, summary`,
+        [runId, input.summary]
+      );
+      await client.query('COMMIT');
+      const row = completed.rows[0];
+      if (!row) throw new Error('Review run completion returned no row');
+      return { runId: row.id, status: row.status, summary: row.summary };
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getReviewContext(reviewRunId: string): Promise<GitLabReviewContext | null> {
+    const result = await this.#pool.query<ReviewContextRow>(
+      `SELECT r.id AS review_run_id,
+              gi.id AS instance_id,
+              gi.base_url AS instance_base_url,
+              p.gitlab_id::text AS project_gitlab_id,
+              p.path_with_namespace AS project_path_with_namespace,
+              mr.gitlab_iid AS merge_request_iid,
+              mr.web_url AS merge_request_url
+       FROM review_runs r
+       JOIN merge_requests mr ON mr.id = r.merge_request_id
+       JOIN projects p ON p.id = mr.project_id
+       JOIN gitlab_instances gi ON gi.id = p.instance_id
+       WHERE r.id = $1`,
+      [reviewRunId]
+    );
+    const row = result.rows[0];
+    return row ? {
+      reviewRunId: row.review_run_id,
+      instanceId: row.instance_id,
+      instanceBaseUrl: row.instance_base_url,
+      projectGitlabId: Number(row.project_gitlab_id),
+      projectPathWithNamespace: row.project_path_with_namespace,
+      mergeRequestIid: row.merge_request_iid,
+      mergeRequestUrl: row.merge_request_url
+    } : null;
+  }
+
+  async getDiscussionContext(localDiscussionId: string): Promise<GitLabDiscussionContext | null> {
+    const result = await this.#pool.query<DiscussionContextRow>(
+      `SELECT r.id AS review_run_id,
+              gi.id AS instance_id,
+              gi.base_url AS instance_base_url,
+              p.gitlab_id::text AS project_gitlab_id,
+              p.path_with_namespace AS project_path_with_namespace,
+              mr.gitlab_iid AS merge_request_iid,
+              mr.web_url AS merge_request_url,
+              d.id AS local_discussion_id,
+              d.gitlab_discussion_id
+       FROM discussions d
+       JOIN review_runs r ON r.id = d.review_run_id
+       JOIN merge_requests mr ON mr.id = r.merge_request_id
+       JOIN projects p ON p.id = mr.project_id
+       JOIN gitlab_instances gi ON gi.id = p.instance_id
+       WHERE d.id = $1 AND d.gitlab_discussion_id IS NOT NULL`,
+      [localDiscussionId]
+    );
+    const row = result.rows[0];
+    return row ? {
+      reviewRunId: row.review_run_id,
+      instanceId: row.instance_id,
+      instanceBaseUrl: row.instance_base_url,
+      projectGitlabId: Number(row.project_gitlab_id),
+      projectPathWithNamespace: row.project_path_with_namespace,
+      mergeRequestIid: row.merge_request_iid,
+      mergeRequestUrl: row.merge_request_url,
+      localDiscussionId: row.local_discussion_id,
+      gitlabDiscussionId: row.gitlab_discussion_id
+    } : null;
+  }
+
+  async recordGitLabDiscussion(input: RecordGitLabDiscussionInput): Promise<{ localDiscussionId: string }> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const discussion = await client.query<{ id: string }>(
+        `INSERT INTO discussions (review_run_id, gitlab_discussion_id, resolved)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (review_run_id, gitlab_discussion_id) WHERE gitlab_discussion_id IS NOT NULL DO UPDATE
+         SET resolved = EXCLUDED.resolved
+         RETURNING id`,
+        [input.reviewRunId, input.gitlabDiscussionId, input.resolved]
+      );
+      const discussionId = discussion.rows[0]?.id;
+      if (!discussionId) throw new Error('Discussion insert returned no row');
+      await client.query(
+        `INSERT INTO comments (discussion_id, author_type, author_name, body, gitlab_note_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()))
+         ON CONFLICT (discussion_id, gitlab_note_id) WHERE gitlab_note_id IS NOT NULL DO NOTHING`,
+        [discussionId, input.comment.authorType, input.comment.authorName, input.comment.body, input.comment.gitlabNoteId, input.comment.createdAt ?? null]
+      );
+      await client.query('COMMIT');
+      return { localDiscussionId: discussionId };
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordGitLabReply(input: RecordGitLabReplyInput): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO comments (discussion_id, author_type, author_name, body, gitlab_note_id)
+       VALUES ($1, 'hunkwise', $2, $3, $4)
+       ON CONFLICT (discussion_id, gitlab_note_id) WHERE gitlab_note_id IS NOT NULL DO NOTHING`,
+      [input.localDiscussionId, input.authorName, input.body, input.gitlabNoteId]
+    );
+  }
+
+  async updateGitLabDiscussionResolved(localDiscussionId: string, resolved: boolean): Promise<void> {
+    await this.#pool.query('UPDATE discussions SET resolved = $2 WHERE id = $1', [localDiscussionId, resolved]);
+  }
+
+  async recordGitLabWebhook(input: RecordGitLabWebhookInput): Promise<RecordGitLabWebhookResult> {
+    const result = await this.#pool.query<{ id: string; inserted: boolean }>(
+      `INSERT INTO gitlab_webhook_events (instance_id, event_key, event_type, payload)
+       VALUES ($1, $2, $3, $4::jsonb)
+       ON CONFLICT (instance_id, event_key) DO UPDATE
+       SET event_key = gitlab_webhook_events.event_key
+       RETURNING id, (xmax = 0) AS inserted`,
+      [input.instanceId, input.eventKey, input.eventType, JSON.stringify(input.payload)]
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error('Webhook insert returned no row');
+    return { eventId: row.id, duplicate: !row.inserted };
+  }
+
+  async completeGitLabWebhook(eventId: string, reviewRunId: string | null): Promise<void> {
+    await this.#pool.query(
+      'UPDATE gitlab_webhook_events SET review_run_id = $2, processed_at = now() WHERE id = $1 AND processed_at IS NULL',
+      [eventId, reviewRunId]
+    );
   }
 }

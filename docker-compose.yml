@@ -26,6 +26,7 @@ services:
       DATABASE_URL: postgres://hunkwise:${POSTGRES_PASSWORD:-hunkwise-local-only}@postgres:5432/hunkwise
       DATABASE_SSL_MODE: disable
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?Set APP_ENCRYPTION_KEY to a base64-encoded 32-byte key}
+      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:-hunkwise-local-webhook-secret}
     command: ["sh", "-c", "node packages/db/dist/migrate.js && node apps/api/dist/main.js"]
     ports:
       - "3000:3000"

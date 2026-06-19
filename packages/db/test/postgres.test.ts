@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EncryptedSecret } from '../src/index.js';
+import type { EncryptedSecret, GitLabReviewSnapshot } from '../src/index.js';
 import { PostgresStore } from '../src/index.js';
 import { migrate } from '../src/migrate.js';
 
@@ -49,7 +49,8 @@ describe('PostgreSQL persistence', () => {
       '001_foundation.sql',
       '002_review_ownership_integrity.sql',
       '003_gitlab_base_url_shape.sql',
-      '004_case_insensitive_gitlab_base_url.sql'
+      '004_case_insensitive_gitlab_base_url.sql',
+      '005_gitlab_webhook_events.sql'
     ]);
     expect(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
   });
@@ -88,6 +89,70 @@ describe('PostgreSQL persistence', () => {
     expect(detail?.run.id).toBe(runs.first);
     expect(detail?.files.map((file) => file.newPath)).toEqual(['one.ts']);
     expect(detail?.hunks.map((hunk) => hunk.patch)).toEqual(['+one']);
+  });
+
+  it('upserts GitLab review snapshots idempotently for the same MR SHA', async () => {
+    const instance = await store.createInstance({ name: 'GitLab', baseUrl: 'https://gitlab.snapshot.test', encryptedAccessToken: 'v1:ciphertext' as EncryptedSecret });
+    const snapshot: GitLabReviewSnapshot = {
+      instanceId: instance.id,
+      project: { gitlabId: 123, pathWithNamespace: 'group/project', defaultBranch: 'main', webUrl: 'https://gitlab.snapshot.test/group/project' },
+      mergeRequest: {
+        gitlabIid: 7,
+        title: 'MR',
+        authorUsername: 'alice',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        sourceSha: 'head-sha',
+        targetSha: 'base-sha',
+        state: 'open',
+        webUrl: 'https://gitlab.snapshot.test/group/project/-/merge_requests/7'
+      },
+      files: [{
+        oldPath: 'a.ts',
+        newPath: 'a.ts',
+        status: 'modified',
+        additions: 1,
+        deletions: 1,
+        hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, header: '@@ -1 +1 @@', patch: '@@ -1 +1 @@\n-old\n+new', position: 0 }]
+      }],
+      discussions: [{
+        gitlabDiscussionId: 'discussion-1',
+        resolved: false,
+        comments: [{ authorType: 'gitlab', authorName: 'bob', body: 'Existing', gitlabNoteId: 'note-1', createdAt: '2026-01-01T00:00:00Z' }]
+      }],
+      summary: 'GitLab ingestion complete; AI review pending Slice 3'
+    };
+
+    const first = await store.upsertGitLabReviewSnapshot(snapshot);
+    const second = await store.upsertGitLabReviewSnapshot({
+      ...snapshot,
+      discussions: [{
+        ...snapshot.discussions[0]!,
+        comments: [
+          ...snapshot.discussions[0]!.comments,
+          { authorType: 'gitlab', authorName: 'carol', body: 'Follow-up', gitlabNoteId: 'note-2', createdAt: '2026-01-01T00:01:00Z' }
+        ]
+      }]
+    });
+    expect(second.runId).toBe(first.runId);
+    const runs = await store.listReviews({ limit: 20, offset: 0 });
+    expect(runs.total).toBe(1);
+    const detail = await store.getReview(first.runId);
+    expect(detail?.files).toMatchObject([{ newPath: 'a.ts', additions: 1, deletions: 1 }]);
+    expect(detail?.hunks).toMatchObject([{ header: '@@ -1 +1 @@', position: 0 }]);
+    expect(detail?.discussions).toMatchObject([{ gitlabDiscussionId: 'discussion-1', resolved: false }]);
+    expect(detail?.comments).toMatchObject([{ body: 'Existing', gitlabNoteId: 'note-1' }, { body: 'Follow-up', gitlabNoteId: 'note-2' }]);
+  });
+
+  it('deduplicates webhook events per instance and records completion', async () => {
+    const instance = await store.createInstance({ name: 'GitLab', baseUrl: 'https://gitlab.webhook.test', encryptedAccessToken: 'v1:ciphertext' as EncryptedSecret });
+    const first = await store.recordGitLabWebhook({ instanceId: instance.id, eventKey: 'event-1', eventType: 'Merge Request Hook', payload: { object_kind: 'merge_request' } });
+    const duplicate = await store.recordGitLabWebhook({ instanceId: instance.id, eventKey: 'event-1', eventType: 'Merge Request Hook', payload: { object_kind: 'merge_request' } });
+    expect(first.duplicate).toBe(false);
+    expect(duplicate).toMatchObject({ duplicate: true, eventId: first.eventId });
+    await store.completeGitLabWebhook(first.eventId, null);
+    const row = await pool.query<{ processed_at: Date | null }>('SELECT processed_at FROM gitlab_webhook_events WHERE id = $1', [first.eventId]);
+    expect(row.rows[0]?.processed_at).toBeInstanceOf(Date);
   });
 
   it('rejects cross-run hunk and finding references', async () => {

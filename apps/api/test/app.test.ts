@@ -1,10 +1,22 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import type { GitLabInstance, Pagination, ReviewDetail, ReviewList } from '@hunkwise/contracts';
+import type {
+  CreateDiffDiscussion,
+  CreateOverviewDiscussion,
+  GitLabDiscussionActionResponse,
+  GitLabWebhookResponse,
+  GitLabInstance,
+  Pagination,
+  ReviewDetail,
+  ReviewList,
+  ReviewRunReference,
+  SubmitReview,
+  TestGitLabInstanceResponse
+} from '@hunkwise/contracts';
 import type { HunkwiseStore, NewInstanceRecord, UpdateInstanceRecord } from '@hunkwise/db';
 import { buildApp } from '../src/app.js';
 import { AesGcmSecretCipher } from '../src/crypto.js';
-import { UnavailableGitLabGateway, UnavailableReviewEngine } from '../src/services.js';
+import type { GitLabReviewActions } from '../src/gitlab-review-service.js';
 
 class MemoryStore implements HunkwiseStore {
   instances = new Map<string, GitLabInstance>();
@@ -35,15 +47,39 @@ class MemoryStore implements HunkwiseStore {
   async getReview(id: string): Promise<ReviewDetail | null> { return this.review?.run.id === id ? this.review : null; }
 }
 
+class FakeGitLabReview implements GitLabReviewActions {
+  submissions: SubmitReview[] = [];
+  webhooks: Array<{ instanceId: string; eventType: string; eventKey: string | null; payload: unknown }> = [];
+  async testInstance(): Promise<TestGitLabInstanceResponse> { return { ok: true, username: 'root', version: '17.0.0' }; }
+  async submit(input: SubmitReview): Promise<ReviewRunReference> {
+    this.submissions.push(input);
+    return { runId: randomUUID(), status: 'completed', summary: 'GitLab ingestion complete; AI review pending Slice 3' };
+  }
+  async refresh(): Promise<ReviewRunReference> { return { runId: randomUUID(), status: 'completed', summary: 'GitLab ingestion complete; AI review pending Slice 3' }; }
+  async addOverviewDiscussion(_reviewRunId: string, _input: CreateOverviewDiscussion): Promise<GitLabDiscussionActionResponse> {
+    return { gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-1', resolved: false };
+  }
+  async addDiffDiscussion(_reviewRunId: string, _input: CreateDiffDiscussion): Promise<GitLabDiscussionActionResponse> {
+    return { gitlabDiscussionId: 'discussion-2', gitlabNoteId: 'note-2', resolved: false };
+  }
+  async replyToDiscussion(): Promise<GitLabDiscussionActionResponse> { return { gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-3' }; }
+  async setDiscussionResolved(): Promise<GitLabDiscussionActionResponse> { return { gitlabDiscussionId: 'discussion-1', resolved: true }; }
+  async handleWebhook(instanceId: string, eventType: string, eventKey: string | null, payload: unknown): Promise<GitLabWebhookResponse> {
+    this.webhooks.push({ instanceId, eventType, eventKey, payload });
+    return { accepted: true, duplicate: false, runId: randomUUID() };
+  }
+}
+
 const setup = async () => {
   const store = new MemoryStore();
+  const gitlabReview = new FakeGitLabReview();
   const app = await buildApp({
     store,
     cipher: new AesGcmSecretCipher(randomBytes(32).toString('base64')),
-    gitlab: new UnavailableGitLabGateway(),
-    reviewEngine: new UnavailableReviewEngine()
+    gitlabReview,
+    gitlabWebhookSecret: 'webhook-secret'
   });
-  return { app, store };
+  return { app, store, gitlabReview };
 };
 
 describe('API', () => {
@@ -158,12 +194,55 @@ describe('API', () => {
     await app.close();
   });
 
-  it('fails review submission clearly while GitLab is unavailable', async () => {
-    const { app } = await setup();
+  it('submits review ingestion through the GitLab review service', async () => {
+    const { app, gitlabReview } = await setup();
     const created = await app.inject({ method: 'POST', url: '/api/instances', payload: { name: 'Team', baseUrl: 'https://gitlab.example.com', accessToken: 'secret' } });
     const response = await app.inject({ method: 'POST', url: '/api/reviews', payload: { instanceId: created.json().id, mergeRequestUrl: 'https://gitlab.example.com/group/project/-/merge_requests/7' } });
-    expect(response.statusCode).toBe(501);
-    expect(response.json().error.code).toBe('integration_not_implemented');
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toMatchObject({ status: 'completed', summary: 'GitLab ingestion complete; AI review pending Slice 3' });
+    expect(gitlabReview.submissions).toHaveLength(1);
+    await app.close();
+  });
+
+  it('tests an instance connection and validates webhook tokens before dispatch', async () => {
+    const { app, gitlabReview } = await setup();
+    const created = await app.inject({ method: 'POST', url: '/api/instances', payload: { name: 'Team', baseUrl: 'https://gitlab.example.com', accessToken: 'secret' } });
+    expect((await app.inject({ method: 'POST', url: `/api/instances/${created.json().id}/test` })).json()).toMatchObject({ ok: true, username: 'root' });
+
+    const rejected = await app.inject({
+      method: 'POST',
+      url: `/api/webhooks/gitlab/${created.json().id}`,
+      headers: { 'x-gitlab-token': 'wrong', 'x-gitlab-event': 'Merge Request Hook' },
+      payload: { object_kind: 'merge_request' }
+    });
+    expect(rejected.statusCode).toBe(401);
+
+    const accepted = await app.inject({
+      method: 'POST',
+      url: `/api/webhooks/gitlab/${created.json().id}`,
+      headers: { 'x-gitlab-token': 'webhook-secret', 'x-gitlab-event': 'Merge Request Hook', 'x-gitlab-event-uuid': 'event-1' },
+      payload: { object_kind: 'merge_request' }
+    });
+    expect(accepted.statusCode).toBe(202);
+    expect(gitlabReview.webhooks).toMatchObject([{ eventType: 'Merge Request Hook', eventKey: 'event-1' }]);
+    await app.close();
+  });
+
+  it('exposes GitLab discussion action endpoints', async () => {
+    const { app } = await setup();
+    const runId = randomUUID();
+    const discussionId = randomUUID();
+    expect((await app.inject({ method: 'POST', url: `/api/reviews/${runId}/gitlab/discussions`, payload: { body: 'Looks good' } })).statusCode).toBe(201);
+    expect((await app.inject({
+      method: 'POST',
+      url: `/api/reviews/${runId}/gitlab/diff-discussions`,
+      payload: {
+        body: 'Please check this',
+        position: { baseSha: 'base', startSha: 'start', headSha: 'head', oldPath: 'a.ts', newPath: 'a.ts', newLine: 3 }
+      }
+    })).statusCode).toBe(201);
+    expect((await app.inject({ method: 'POST', url: `/api/gitlab/discussions/${discussionId}/notes`, payload: { body: 'Reply' } })).statusCode).toBe(201);
+    expect((await app.inject({ method: 'PUT', url: `/api/gitlab/discussions/${discussionId}/resolution`, payload: { resolved: true } })).statusCode).toBe(200);
     await app.close();
   });
 

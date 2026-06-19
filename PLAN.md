@@ -21,6 +21,8 @@ Acceptance criteria:
 
 Connect configured GitLab instances, resolve MR URLs, synchronize project/MR metadata and diffs, and create durable review runs.
 
+Status: implemented in this slice. The API supports arbitrary self-hosted GitLab base URLs, encrypted token retrieval at the outbound boundary, MR URL validation, metadata/diff/discussion ingestion, discussion writeback, refresh, and GitLab webhook dedupe. AI analysis remains deferred to Slice 3.
+
 Acceptance criteria:
 
 - GitLab client decrypts credentials only at the outbound adapter boundary and redacts them from logs/errors.
@@ -64,4 +66,3 @@ Acceptance criteria:
 - Backups/restores, key rotation, data retention, rate limiting, and disaster recovery are exercised and documented.
 - Security review covers SSRF, webhook authenticity, prompt injection, dependency/container scanning, and least privilege.
 - Upgrade/rollback procedures, load targets, end-to-end tests, and a release checklist pass in a production-like environment.
-

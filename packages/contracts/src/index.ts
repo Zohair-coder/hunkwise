@@ -167,6 +167,61 @@ export const submitReviewSchema = z.object({
 });
 export type SubmitReview = z.infer<typeof submitReviewSchema>;
 
+export const reviewRunReferenceSchema = z.object({
+  runId: id,
+  status: reviewRunStatusSchema,
+  summary: z.string().nullable()
+});
+export type ReviewRunReference = z.infer<typeof reviewRunReferenceSchema>;
+
+export const testGitLabInstanceResponseSchema = z.object({
+  ok: z.boolean(),
+  username: z.string().nullable(),
+  version: z.string().nullable()
+});
+export type TestGitLabInstanceResponse = z.infer<typeof testGitLabInstanceResponseSchema>;
+
+export const gitLabPositionSchema = z.object({
+  baseSha: nonEmpty,
+  startSha: nonEmpty,
+  headSha: nonEmpty,
+  oldPath: nonEmpty,
+  newPath: nonEmpty,
+  positionType: z.literal('text').default('text'),
+  oldLine: z.number().int().positive().optional(),
+  newLine: z.number().int().positive().optional()
+}).refine((value) => value.oldLine !== undefined || value.newLine !== undefined, 'A diff position requires oldLine or newLine');
+export type GitLabPosition = z.infer<typeof gitLabPositionSchema>;
+
+export const createOverviewDiscussionSchema = z.object({ body: nonEmpty.max(65_536) });
+export type CreateOverviewDiscussion = z.infer<typeof createOverviewDiscussionSchema>;
+
+export const createDiffDiscussionSchema = z.object({
+  body: nonEmpty.max(65_536),
+  position: gitLabPositionSchema
+});
+export type CreateDiffDiscussion = z.infer<typeof createDiffDiscussionSchema>;
+
+export const replyDiscussionSchema = z.object({ body: nonEmpty.max(65_536) });
+export type ReplyDiscussion = z.infer<typeof replyDiscussionSchema>;
+
+export const updateDiscussionResolutionSchema = z.object({ resolved: z.boolean() });
+export type UpdateDiscussionResolution = z.infer<typeof updateDiscussionResolutionSchema>;
+
+export const gitLabDiscussionActionResponseSchema = z.object({
+  gitlabDiscussionId: nonEmpty,
+  gitlabNoteId: z.string().nullable().optional(),
+  resolved: z.boolean().optional()
+});
+export type GitLabDiscussionActionResponse = z.infer<typeof gitLabDiscussionActionResponseSchema>;
+
+export const gitLabWebhookResponseSchema = z.object({
+  accepted: z.boolean(),
+  duplicate: z.boolean(),
+  runId: id.nullable()
+});
+export type GitLabWebhookResponse = z.infer<typeof gitLabWebhookResponseSchema>;
+
 export const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0)

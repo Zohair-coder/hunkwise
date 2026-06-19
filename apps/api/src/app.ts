@@ -1,24 +1,31 @@
 import path from 'node:path';
+import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import helmet from '@fastify/helmet';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
   createGitLabInstanceSchema,
+  createDiffDiscussionSchema,
+  createOverviewDiscussionSchema,
+  replyDiscussionSchema,
   paginationSchema,
   submitReviewSchema,
+  updateDiscussionResolutionSchema,
   updateGitLabInstanceSchema
 } from '@hunkwise/contracts';
 import type { HunkwiseStore, SecretCipher, UpdateInstanceRecord } from '@hunkwise/db';
 import { ZodError } from 'zod';
-import type { GitLabGateway, ReviewEngine } from './services.js';
-import { DownstreamUnavailableError } from './services.js';
+import { GitLabClientError } from './gitlab-client.js';
+import { GitLabReviewServiceError } from './gitlab-review-service.js';
+import type { GitLabReviewActions } from './gitlab-review-service.js';
+import { MergeRequestUrlError } from './gitlab-url.js';
 
 export interface AppDependencies {
   store: HunkwiseStore;
   cipher: SecretCipher;
-  gitlab: GitLabGateway;
-  reviewEngine: ReviewEngine;
+  gitlabReview: GitLabReviewActions;
+  gitlabWebhookSecret?: string;
 }
 
 export interface BuildAppOptions {
@@ -46,6 +53,13 @@ const isPgUniqueViolation = (error: unknown): boolean =>
 
 type FastifyClientError = Error & { code?: string; statusCode?: number };
 const isFastifyClientError = (error: unknown): error is FastifyClientError => error instanceof Error;
+
+const webhookTokenMatches = (actual: string | undefined, expected: string | undefined): boolean => {
+  if (!expected || !actual) return false;
+  const actualBytes = Buffer.from(actual);
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+};
 
 export async function buildApp(dependencies: AppDependencies, options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
@@ -79,9 +93,17 @@ export async function buildApp(dependencies: AppDependencies, options: BuildAppO
       statusCode = error.statusCode;
       code = error.code;
       message = error.message;
-    } else if (error instanceof DownstreamUnavailableError) {
-      statusCode = 501;
-      code = 'integration_not_implemented';
+    } else if (error instanceof MergeRequestUrlError) {
+      statusCode = 400;
+      code = error.code;
+      message = error.message;
+    } else if (error instanceof GitLabClientError) {
+      statusCode = error.statusCode ?? 502;
+      code = error.code;
+      message = error.message;
+    } else if (error instanceof GitLabReviewServiceError) {
+      statusCode = error.code === 'instance_not_found' || error.code === 'review_not_found' || error.code === 'discussion_not_found' ? 404 : 400;
+      code = error.code;
       message = error.message;
     } else if (isPgUniqueViolation(error)) {
       statusCode = 409;
@@ -153,6 +175,7 @@ export async function buildApp(dependencies: AppDependencies, options: BuildAppO
     }
     return reply.status(204).send();
   });
+  app.post('/api/instances/:id/test', async (request) => dependencies.gitlabReview.testInstance(idParams(request.params)));
 
   app.get('/api/reviews', async (request) => dependencies.store.listReviews(paginationSchema.parse(request.query)));
   app.get('/api/reviews/:id', async (request) => {
@@ -162,10 +185,37 @@ export async function buildApp(dependencies: AppDependencies, options: BuildAppO
   });
   app.post('/api/reviews', async (request, reply) => {
     const input = submitReviewSchema.parse(request.body);
-    const instance = await dependencies.store.getInstance(input.instanceId);
-    if (!instance) throw new HttpError(404, 'not_found', 'GitLab instance not found');
-    const resolved = await dependencies.gitlab.resolveMergeRequest(instance, input.mergeRequestUrl);
-    const result = await dependencies.reviewEngine.start(resolved);
+    const result = await dependencies.gitlabReview.submit(input);
+    return reply.status(202).send(result);
+  });
+  app.post('/api/reviews/:id/refresh', async (request, reply) => {
+    const result = await dependencies.gitlabReview.refresh(idParams(request.params));
+    return reply.status(202).send(result);
+  });
+  app.post('/api/reviews/:id/gitlab/discussions', async (request, reply) => {
+    const result = await dependencies.gitlabReview.addOverviewDiscussion(idParams(request.params), createOverviewDiscussionSchema.parse(request.body));
+    return reply.status(201).send(result);
+  });
+  app.post('/api/reviews/:id/gitlab/diff-discussions', async (request, reply) => {
+    const result = await dependencies.gitlabReview.addDiffDiscussion(idParams(request.params), createDiffDiscussionSchema.parse(request.body));
+    return reply.status(201).send(result);
+  });
+  app.post('/api/gitlab/discussions/:id/notes', async (request, reply) => {
+    const result = await dependencies.gitlabReview.replyToDiscussion(idParams(request.params), replyDiscussionSchema.parse(request.body).body);
+    return reply.status(201).send(result);
+  });
+  app.put('/api/gitlab/discussions/:id/resolution', async (request) =>
+    dependencies.gitlabReview.setDiscussionResolved(idParams(request.params), updateDiscussionResolutionSchema.parse(request.body).resolved)
+  );
+  app.post('/api/webhooks/gitlab/:id', async (request, reply) => {
+    if (!dependencies.gitlabWebhookSecret) throw new HttpError(503, 'webhook_not_configured', 'GitLab webhook secret is not configured');
+    const supplied = request.headers['x-gitlab-token'];
+    if (!webhookTokenMatches(typeof supplied === 'string' ? supplied : undefined, dependencies.gitlabWebhookSecret)) {
+      throw new HttpError(401, 'invalid_webhook_token', 'GitLab webhook token is invalid');
+    }
+    const eventType = typeof request.headers['x-gitlab-event'] === 'string' ? request.headers['x-gitlab-event'] : 'unknown';
+    const eventKey = typeof request.headers['x-gitlab-event-uuid'] === 'string' ? request.headers['x-gitlab-event-uuid'] : null;
+    const result = await dependencies.gitlabReview.handleWebhook(idParams(request.params), eventType, eventKey, request.body);
     return reply.status(202).send(result);
   });
 

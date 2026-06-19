@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { createGitLabInstanceSchema, submitReviewSchema, updateGitLabInstanceSchema } from '../src/index.js';
+import {
+  createDiffDiscussionSchema,
+  createGitLabInstanceSchema,
+  gitLabDiscussionActionResponseSchema,
+  gitLabWebhookResponseSchema,
+  reviewRunReferenceSchema,
+  submitReviewSchema,
+  updateDiscussionResolutionSchema,
+  updateGitLabInstanceSchema
+} from '../src/index.js';
 
 describe('API contracts', () => {
   it('normalizes instance URLs', () => {
@@ -37,5 +46,24 @@ describe('API contracts', () => {
 
   it('requires a valid MR submission', () => {
     expect(submitReviewSchema.safeParse({ instanceId: 'not-an-id', mergeRequestUrl: 'gitlab/project/1' }).success).toBe(false);
+  });
+
+  it('validates Slice 2 response and discussion contracts', () => {
+    expect(reviewRunReferenceSchema.parse({
+      runId: '05b6f6a5-1ac5-4499-a7dd-f2fd0f310351',
+      status: 'completed',
+      summary: 'GitLab ingestion complete; AI review pending Slice 3'
+    }).status).toBe('completed');
+    expect(createDiffDiscussionSchema.safeParse({
+      body: 'Comment',
+      position: { baseSha: 'base', startSha: 'start', headSha: 'head', oldPath: 'a.ts', newPath: 'a.ts', newLine: 1 }
+    }).success).toBe(true);
+    expect(createDiffDiscussionSchema.safeParse({
+      body: 'Comment',
+      position: { baseSha: 'base', startSha: 'start', headSha: 'head', oldPath: 'a.ts', newPath: 'a.ts' }
+    }).success).toBe(false);
+    expect(updateDiscussionResolutionSchema.parse({ resolved: true }).resolved).toBe(true);
+    expect(gitLabDiscussionActionResponseSchema.parse({ gitlabDiscussionId: 'abc', gitlabNoteId: null }).gitlabDiscussionId).toBe('abc');
+    expect(gitLabWebhookResponseSchema.parse({ accepted: true, duplicate: false, runId: null }).accepted).toBe(true);
   });
 });
