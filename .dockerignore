@@ -1,0 +1,8 @@
+.git
+node_modules
+**/dist
+coverage
+.env
+.devin-review-reference.png
+*.log
+

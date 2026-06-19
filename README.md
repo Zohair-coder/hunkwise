@@ -1,0 +1,80 @@
+# Hunkwise
+
+Hunkwise is a self-hosted GitLab code-review workspace. Slice 1 establishes the production foundation: contracts, persistence, a secure API, and a responsive review shell. GitLab synchronization and AI review execution are intentionally unavailable until later slices; the submission API returns a structured `501` instead of simulating a run.
+
+## Architecture
+
+The npm workspace targets Node 22 and keeps dependencies directional:
+
+```text
+apps/web  ───────► packages/contracts
+apps/api  ───────► packages/contracts
+    │             packages/db ─────► packages/contracts
+    └────────────► packages/db ─────► PostgreSQL
+```
+
+- `packages/contracts`: Zod request/domain schemas shared by API and UI.
+- `packages/db`: a small `pg` store interface, PostgreSQL implementation, and ordered SQL migrations.
+- `apps/api`: Fastify composition root, REST routes, AES-256-GCM secret boundary, health checks, and downstream interfaces.
+- `apps/web`: React/Vite landing page and responsive three-column review workspace.
+
+GitLab tokens cross the API only on instance create/update. They are encrypted before the store receives them, using a versioned AES-256-GCM envelope with a random nonce. Responses expose only `hasAccessToken`. Back up `APP_ENCRYPTION_KEY` securely; changing it makes existing credentials unreadable. Production deployments should inject it from a secret manager.
+
+## Local development
+
+Prerequisites: Node.js 22, npm, and PostgreSQL 15 or newer.
+
+```bash
+npm install
+cp .env.example .env
+# Set DATABASE_URL and generate APP_ENCRYPTION_KEY with: openssl rand -base64 32
+set -a && source .env && set +a
+npm run db:migrate
+npm run dev
+```
+
+Vite runs at `http://localhost:5173` and proxies API calls to Fastify on port `3000`. Build and validate everything with:
+
+```bash
+npm run check
+```
+
+To configure the first GitLab instance during Slice 1:
+
+```bash
+curl -X POST http://localhost:3000/api/instances \
+  -H 'content-type: application/json' \
+  -d '{"name":"GitLab","baseUrl":"https://gitlab.example.com","accessToken":"glpat-..."}'
+```
+
+## Docker Compose
+
+```bash
+export APP_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+docker compose up --build
+```
+
+The app applies migrations under a PostgreSQL advisory lock, then serves the API and built frontend at `http://localhost:3000`. The Compose password is for local use; set `POSTGRES_PASSWORD` outside local development. The app container runs as an unprivileged user.
+
+## REST contracts
+
+| Method | Path | Behavior |
+|---|---|---|
+| `GET` | `/health/live` | Process liveness |
+| `GET` | `/health/ready` | Database readiness (`503` when unavailable) |
+| `GET/POST` | `/api/instances` | List/create GitLab instances |
+| `GET/PATCH/DELETE` | `/api/instances/:id` | Instance CRUD; tokens are never returned |
+| `GET` | `/api/reviews?limit=&offset=` | Paginated review-run list |
+| `GET` | `/api/reviews/:id` | Review-run detail |
+| `POST` | `/api/reviews` | Validates MR submission; `501` until Slice 2 |
+
+All errors use `{ "error": { "code", "message", "requestId", "details?" } }`. Request IDs are returned as `x-request-id`. Bodies are limited to 1 MiB and security headers are enabled.
+
+## Operational notes
+
+- Liveness does not touch dependencies; readiness verifies PostgreSQL.
+- The process handles `SIGINT`/`SIGTERM`, stops accepting traffic, drains Fastify, and closes the pool.
+- Migrations are append-only SQL in `packages/db/migrations` and tracked in `schema_migrations`.
+- Keep TLS termination in front of the service. Configure PostgreSQL TLS in hosted deployments; the application rejects invalid certificates for non-Compose production database URLs.
+- No OpenAI credential is read, documented, or required in this slice.
+
