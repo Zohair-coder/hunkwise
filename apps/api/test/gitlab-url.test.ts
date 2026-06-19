@@ -19,4 +19,13 @@ describe('GitLab merge request URL parser', () => {
     expect(() => parseGitLabMergeRequestUrl('https://gitlab.example.com', 'https://gitlab.example.com/project/-/merge_requests/1'))
       .toThrow(MergeRequestUrlError);
   });
+
+  it('rejects malformed percent encodings and encoded path separators as unsafe URLs', () => {
+    expect(() => parseGitLabMergeRequestUrl('https://gitlab.example.com', 'https://gitlab.example.com/group/project%ZZ/-/merge_requests/1'))
+      .toThrow(new MergeRequestUrlError('unsafe_url', 'GitLab merge request URL contains invalid percent encoding'));
+    expect(() => parseGitLabMergeRequestUrl('https://gitlab.example.com', 'https://gitlab.example.com/group/proj%2Fsub/-/merge_requests/1'))
+      .toThrow(new MergeRequestUrlError('unsafe_url', 'GitLab merge request URL contains an encoded path separator'));
+    expect(() => parseGitLabMergeRequestUrl('https://gitlab.example.com', 'https://gitlab.example.com/group/proj%5Csub/-/merge_requests/1'))
+      .toThrow(new MergeRequestUrlError('unsafe_url', 'GitLab merge request URL contains an encoded path separator'));
+  });
 });

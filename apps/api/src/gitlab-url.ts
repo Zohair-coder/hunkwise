@@ -15,6 +15,19 @@ const canonicalPath = (pathname: string): string => {
   return trimmed === '' ? '' : trimmed;
 };
 
+const decodeSegment = (segment: string): string => {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(segment);
+  } catch {
+    throw new MergeRequestUrlError('unsafe_url', 'GitLab merge request URL contains invalid percent encoding');
+  }
+  if (decoded.includes('/') || decoded.includes('\\')) {
+    throw new MergeRequestUrlError('unsafe_url', 'GitLab merge request URL contains an encoded path separator');
+  }
+  return decoded;
+};
+
 export function parseGitLabMergeRequestUrl(instanceBaseUrl: string, candidate: string): ParsedMergeRequestUrl {
   let instance: URL;
   let url: URL;
@@ -39,7 +52,7 @@ export function parseGitLabMergeRequestUrl(instanceBaseUrl: string, candidate: s
   }
 
   const relativePath = (basePath ? requestPath.slice(basePath.length) : requestPath).replace(/^\/+/, '');
-  const parts = relativePath.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+  const parts = relativePath.split('/').filter(Boolean).map(decodeSegment);
   const marker = parts.lastIndexOf('-');
   if (marker < 1 || parts[marker + 1] !== 'merge_requests' || parts.length !== marker + 3) {
     throw new MergeRequestUrlError('not_merge_request_url', 'URL must point to /namespace/project/-/merge_requests/:iid');

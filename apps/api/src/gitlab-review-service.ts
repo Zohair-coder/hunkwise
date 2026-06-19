@@ -124,7 +124,8 @@ export class GitLabReviewService implements GitLabReviewActions {
     const instance = await this.#instance(instanceId);
     const key = eventKey ?? fallbackWebhookKey(eventType, payload);
     const event = await this.#store.recordGitLabWebhook({ instanceId, eventKey: key, eventType, payload });
-    if (event.duplicate) return { accepted: true, duplicate: true, runId: null };
+    if (event.state === 'completed_duplicate') return { accepted: true, duplicate: true, runId: event.reviewRunId };
+    if (event.state === 'in_progress') return { accepted: true, duplicate: true, runId: null };
 
     const target = webhookTarget(payload);
     if (!target) {
@@ -132,9 +133,14 @@ export class GitLabReviewService implements GitLabReviewActions {
       throw new GitLabReviewServiceError('unsupported_webhook', 'Webhook does not reference a merge request');
     }
 
-    const result = await this.#ingest(instance, target.projectPath, target.mergeRequestIid);
-    await this.#store.completeGitLabWebhook(event.eventId, result.runId);
-    return { accepted: true, duplicate: false, runId: result.runId };
+    try {
+      const result = await this.#ingest(instance, target.projectPath, target.mergeRequestIid);
+      await this.#store.completeGitLabWebhook(event.eventId, result.runId);
+      return { accepted: true, duplicate: false, runId: result.runId };
+    } catch (error) {
+      await this.#store.failGitLabWebhook(event.eventId, error instanceof Error ? error : new Error('Webhook processing failed'));
+      throw error;
+    }
   }
 
   async #ingest(instance: GitLabInstance, projectPath: string, mergeRequestIid: number): Promise<ReviewRunReference> {

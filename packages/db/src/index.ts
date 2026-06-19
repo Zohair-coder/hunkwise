@@ -152,6 +152,8 @@ export interface RecordGitLabWebhookInput {
 export interface RecordGitLabWebhookResult {
   duplicate: boolean;
   eventId: string;
+  state: 'claimed' | 'completed_duplicate' | 'in_progress';
+  reviewRunId: string | null;
 }
 
 export interface GitLabReviewStore {
@@ -163,6 +165,7 @@ export interface GitLabReviewStore {
   updateGitLabDiscussionResolved(localDiscussionId: string, resolved: boolean): Promise<void>;
   recordGitLabWebhook(input: RecordGitLabWebhookInput): Promise<RecordGitLabWebhookResult>;
   completeGitLabWebhook(eventId: string, reviewRunId: string | null): Promise<void>;
+  failGitLabWebhook(eventId: string, error: Error): Promise<void>;
 }
 
 interface InstanceRow {
@@ -618,23 +621,79 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
   }
 
   async recordGitLabWebhook(input: RecordGitLabWebhookInput): Promise<RecordGitLabWebhookResult> {
-    const result = await this.#pool.query<{ id: string; inserted: boolean }>(
-      `INSERT INTO gitlab_webhook_events (instance_id, event_key, event_type, payload)
-       VALUES ($1, $2, $3, $4::jsonb)
-       ON CONFLICT (instance_id, event_key) DO UPDATE
-       SET event_key = gitlab_webhook_events.event_key
-       RETURNING id, (xmax = 0) AS inserted`,
-      [input.instanceId, input.eventKey, input.eventType, JSON.stringify(input.payload)]
-    );
-    const row = result.rows[0];
-    if (!row) throw new Error('Webhook insert returned no row');
-    return { eventId: row.id, duplicate: !row.inserted };
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO gitlab_webhook_events (instance_id, event_key, event_type, payload, processing_started_at)
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (instance_id, event_key) DO NOTHING
+         RETURNING id`,
+        [input.instanceId, input.eventKey, input.eventType, JSON.stringify(input.payload)]
+      );
+      const insertedId = inserted.rows[0]?.id;
+      if (insertedId) {
+        await client.query('COMMIT');
+        return { eventId: insertedId, duplicate: false, state: 'claimed', reviewRunId: null };
+      }
+
+      const existing = await client.query<{
+        id: string;
+        review_run_id: string | null;
+        processed_at: Date | null;
+        processing_started_at: Date | null;
+        failed_at: Date | null;
+      }>(
+        `SELECT id, review_run_id, processed_at, processing_started_at, failed_at
+         FROM gitlab_webhook_events
+         WHERE instance_id = $1 AND event_key = $2
+         FOR UPDATE`,
+        [input.instanceId, input.eventKey]
+      );
+      const row = existing.rows[0];
+      if (!row) throw new Error('Webhook event conflict row not found');
+      if (row.processed_at) {
+        await client.query('COMMIT');
+        return { eventId: row.id, duplicate: true, state: 'completed_duplicate', reviewRunId: row.review_run_id };
+      }
+      const activeClaim = row.processing_started_at && !row.failed_at && Date.now() - row.processing_started_at.getTime() < 10 * 60 * 1000;
+      if (activeClaim) {
+        await client.query('COMMIT');
+        return { eventId: row.id, duplicate: true, state: 'in_progress', reviewRunId: null };
+      }
+      await client.query(
+        `UPDATE gitlab_webhook_events
+         SET event_type = $2,
+             payload = $3::jsonb,
+             processing_started_at = now(),
+             failed_at = NULL,
+             failure_message = NULL
+         WHERE id = $1`,
+        [row.id, input.eventType, JSON.stringify(input.payload)]
+      );
+      await client.query('COMMIT');
+      return { eventId: row.id, duplicate: false, state: 'claimed', reviewRunId: null };
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async completeGitLabWebhook(eventId: string, reviewRunId: string | null): Promise<void> {
     await this.#pool.query(
-      'UPDATE gitlab_webhook_events SET review_run_id = $2, processed_at = now() WHERE id = $1 AND processed_at IS NULL',
+      'UPDATE gitlab_webhook_events SET review_run_id = $2, processed_at = now(), failed_at = NULL, failure_message = NULL WHERE id = $1 AND processed_at IS NULL',
       [eventId, reviewRunId]
+    );
+  }
+
+  async failGitLabWebhook(eventId: string, error: Error): Promise<void> {
+    await this.#pool.query(
+      `UPDATE gitlab_webhook_events
+       SET failed_at = now(), failure_message = left($2, 2000)
+       WHERE id = $1 AND processed_at IS NULL`,
+      [eventId, error.message]
     );
   }
 }

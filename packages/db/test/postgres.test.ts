@@ -50,7 +50,8 @@ describe('PostgreSQL persistence', () => {
       '002_review_ownership_integrity.sql',
       '003_gitlab_base_url_shape.sql',
       '004_case_insensitive_gitlab_base_url.sql',
-      '005_gitlab_webhook_events.sql'
+      '005_gitlab_webhook_events.sql',
+      '006_gitlab_webhook_processing_state.sql'
     ]);
     expect(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
   });
@@ -144,13 +145,20 @@ describe('PostgreSQL persistence', () => {
     expect(detail?.comments).toMatchObject([{ body: 'Existing', gitlabNoteId: 'note-1' }, { body: 'Follow-up', gitlabNoteId: 'note-2' }]);
   });
 
-  it('deduplicates webhook events per instance and records completion', async () => {
+  it('retries failed webhook events and suppresses only completed duplicates', async () => {
     const instance = await store.createInstance({ name: 'GitLab', baseUrl: 'https://gitlab.webhook.test', encryptedAccessToken: 'v1:ciphertext' as EncryptedSecret });
     const first = await store.recordGitLabWebhook({ instanceId: instance.id, eventKey: 'event-1', eventType: 'Merge Request Hook', payload: { object_kind: 'merge_request' } });
-    const duplicate = await store.recordGitLabWebhook({ instanceId: instance.id, eventKey: 'event-1', eventType: 'Merge Request Hook', payload: { object_kind: 'merge_request' } });
-    expect(first.duplicate).toBe(false);
-    expect(duplicate).toMatchObject({ duplicate: true, eventId: first.eventId });
+    const inProgress = await store.recordGitLabWebhook({ instanceId: instance.id, eventKey: 'event-1', eventType: 'Merge Request Hook', payload: { object_kind: 'merge_request' } });
+    expect(first).toMatchObject({ duplicate: false, state: 'claimed' });
+    expect(inProgress).toMatchObject({ duplicate: true, state: 'in_progress', eventId: first.eventId });
+
+    await store.failGitLabWebhook(first.eventId, new Error('GitLab outage'));
+    const retry = await store.recordGitLabWebhook({ instanceId: instance.id, eventKey: 'event-1', eventType: 'Merge Request Hook', payload: { object_kind: 'merge_request', retry: true } });
+    expect(retry).toMatchObject({ duplicate: false, state: 'claimed', eventId: first.eventId });
+
     await store.completeGitLabWebhook(first.eventId, null);
+    const completedDuplicate = await store.recordGitLabWebhook({ instanceId: instance.id, eventKey: 'event-1', eventType: 'Merge Request Hook', payload: { object_kind: 'merge_request' } });
+    expect(completedDuplicate).toMatchObject({ duplicate: true, state: 'completed_duplicate', eventId: first.eventId });
     const row = await pool.query<{ processed_at: Date | null }>('SELECT processed_at FROM gitlab_webhook_events WHERE id = $1', [first.eventId]);
     expect(row.rows[0]?.processed_at).toBeInstanceOf(Date);
   });
