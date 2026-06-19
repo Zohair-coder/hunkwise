@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import OpenAI from 'openai';
+import { zodResponseFormat } from 'openai/helpers/zod';
 import { z } from 'zod';
 import { sanitizeSecrets, type FindingCategory, type FindingSeverity, type GitLabPosition, type ReviewDetail } from '@hunkwise/contracts';
 import type { AiReviewFindingRecord, GitLabReviewContext } from '@hunkwise/db';
@@ -25,6 +26,8 @@ export const aiReviewModelOutputSchema = z.object({
 });
 
 export type AiReviewModelOutput = z.infer<typeof aiReviewModelOutputSchema>;
+
+export const aiReviewResponseFormat = zodResponseFormat(aiReviewModelOutputSchema, 'hunkwise_ai_review');
 
 export interface AiPromptOptions {
   maxPatchCharacters?: number;
@@ -57,7 +60,7 @@ export class OpenAiReviewClient implements AiReviewClient {
     const completion = await this.#client.chat.completions.create({
       model: input.model,
       temperature: 0,
-      response_format: { type: 'json_object' },
+      response_format: aiReviewResponseFormat,
       messages: [
         { role: 'system', content: input.system },
         { role: 'user', content: input.user }

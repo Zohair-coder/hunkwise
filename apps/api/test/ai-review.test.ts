@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { ReviewDetail } from '@hunkwise/contracts';
 import type { GitLabReviewContext } from '@hunkwise/db';
 import {
+  aiReviewResponseFormat,
   buildReviewPrompt,
   gitLabPositionForFinding,
   mapDiffHunkLines,
@@ -67,6 +68,20 @@ const detail: ReviewDetail = {
 };
 
 describe('AI review helpers', () => {
+  it('requests strict structured JSON output from OpenAI', () => {
+    expect(aiReviewResponseFormat).toMatchObject({
+      type: 'json_schema',
+      json_schema: {
+        name: 'hunkwise_ai_review',
+        strict: true
+      }
+    });
+    expect(aiReviewResponseFormat.json_schema.schema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining(['summary', 'overviewCommentBody', 'findings'])
+    });
+  });
+
   it('builds a deterministic prompt with truncated sanitized diff context and existing discussions', () => {
     const prompt = buildReviewPrompt(detail, context, { maxPatchCharacters: 70, maxHunksPerFile: 1 });
     expect(prompt.user).toContain('[redacted-openai-key]');

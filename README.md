@@ -156,7 +156,7 @@ What success verifies:
 - Hunkwise posts the AI overview and one grounded postable finding when the model returns one. If no grounded postable finding is available, it still posts and verifies the overview and reports that overview-only branch in the sanitized summary.
 - The harness reads GitLab discussions back through the real GitLab API and verifies the posted discussion IDs exist.
 
-The Compose overlay is `docker-compose.gitlab-e2e.yml`. Override `GITLAB_IMAGE` to test a different GitLab CE tag; the default is pinned to `gitlab/gitlab-ce:17.11.0-ce.0` for repeatability.
+The Compose overlay is `docker-compose.gitlab-e2e.yml`. Override `GITLAB_IMAGE` to test a different GitLab CE tag; the default is pinned to `gitlab/gitlab-ce:18.7.0-ce.0` for repeatability and native `linux/arm64` support on Apple Silicon.
 
 ## REST contracts
 
