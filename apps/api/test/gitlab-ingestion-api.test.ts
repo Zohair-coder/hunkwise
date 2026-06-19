@@ -9,6 +9,7 @@ import type {
   GitLabReviewStore,
   HunkwiseStore,
   CompleteAiReviewInput,
+  AiOverviewPostRecord,
   NewInstanceRecord,
   PostAiFindingInput,
   RecordGitLabDiscussionInput,
@@ -65,6 +66,7 @@ class MemoryReviewStore implements HunkwiseStore, GitLabReviewStore {
   async startAiReview(): Promise<void> {}
   async completeAiReview(_input: CompleteAiReviewInput): Promise<void> {}
   async failAiReview(): Promise<void> {}
+  async getAiOverviewPost(): Promise<AiOverviewPostRecord | null> { return null; }
   async recordAiFindingPosted(_input: PostAiFindingInput): Promise<void> {}
   async recordAiOverviewPosted(_input: RecordAiOverviewPostInput): Promise<void> {}
   async recordGitLabWebhook(_input: RecordGitLabWebhookInput): Promise<RecordGitLabWebhookResult> {

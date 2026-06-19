@@ -22,6 +22,20 @@ const instanceBaseUrl = z.string().url().refine(
   'Must be an HTTP(S) base URL without credentials, query, or fragment'
 );
 
+export function sanitizeSecrets(value: string): string {
+  return value
+    .replace(/v1:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+/g, 'v1:[redacted-encrypted-secret]')
+    .replace(/\bpostgres(?:ql)?:\/\/[^\s:/@]+:[^\s@]+@/gi, 'postgres://[redacted]@')
+    .replace(/\b[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD|DATABASE_URL)[A-Z0-9_]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+)/g, (match) => {
+      const separator = match.indexOf('=');
+      return `${match.slice(0, separator + 1)}[redacted]`;
+    })
+    .replace(/(["']?[A-Za-z0-9_]*(?:secret|token|key|password|database_url)[A-Za-z0-9_]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, '$1[redacted]')
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted-openai-key]')
+    .replace(/glpat-[A-Za-z0-9_-]{4,}/g, '[redacted-gitlab-token]')
+    .replace(/([?&#](?:access_token|private_token|token|api_key|key|secret|password)=)[^&#\s]+/gi, '$1[redacted]');
+}
+
 export const gitLabInstanceSchema = z.object({
   id,
   name: nonEmpty.max(120),

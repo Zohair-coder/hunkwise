@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import OpenAI from 'openai';
 import { z } from 'zod';
-import type { FindingCategory, FindingSeverity, GitLabPosition, ReviewDetail } from '@hunkwise/contracts';
+import { sanitizeSecrets, type FindingCategory, type FindingSeverity, type GitLabPosition, type ReviewDetail } from '@hunkwise/contracts';
 import type { AiReviewFindingRecord, GitLabReviewContext } from '@hunkwise/db';
 
 const findingCategorySchema = z.enum(['bug', 'security', 'maintainability', 'test', 'docs', 'performance', 'other']);
@@ -151,7 +151,7 @@ export function buildReviewPrompt(detail: ReviewDetail, context: GitLabReviewCon
     },
     diffRefs: {
       baseSha: context.targetSha,
-      startSha: context.targetSha,
+      startSha: context.startSha,
       headSha: context.sourceSha
     },
     files,
@@ -208,7 +208,7 @@ export function gitLabPositionForFinding(detail: ReviewDetail, context: GitLabRe
     if (!mapped) continue;
     return {
       baseSha: context.targetSha,
-      startSha: context.targetSha,
+      startSha: context.startSha,
       headSha: context.sourceSha,
       oldPath: file.oldPath ?? file.newPath,
       newPath: file.newPath,
@@ -243,11 +243,7 @@ export function mapDiffHunkLines(hunk: { patch: string; oldStart: number; newSta
 }
 
 export function sanitizeForPrompt(value: string): string {
-  return value
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted-openai-key]')
-    .replace(/glpat-[A-Za-z0-9_-]{4,}/g, '[redacted-gitlab-token]')
-    .replace(/(OPENAI_API_KEY|GITLAB_TOKEN|PRIVATE_TOKEN|ACCESS_TOKEN)\s*=\s*[^\s]+/gi, '$1=[redacted]')
-    .replace(/([?&#](?:access_token|private_token|token|api_key)=)[^&#\s]+/gi, '$1[redacted]');
+  return sanitizeSecrets(value);
 }
 
 const hunkIdForFinding = (detail: ReviewDetail, filePath: string, line: number | null): string | null => {

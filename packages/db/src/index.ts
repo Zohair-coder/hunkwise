@@ -1,5 +1,6 @@
 import process from 'node:process';
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
+import { sanitizeSecrets } from '@hunkwise/contracts';
 import type {
   ChatMessage,
   Comment,
@@ -70,6 +71,7 @@ export interface GitLabMergeRequestSnapshot {
   targetBranch: string;
   sourceSha: string;
   targetSha: string;
+  startSha: string;
   state: 'open' | 'merged' | 'closed';
   webUrl: string;
 }
@@ -128,6 +130,7 @@ export interface GitLabReviewContext {
   targetBranch: string;
   sourceSha: string;
   targetSha: string;
+  startSha: string;
   mergeRequestUrl: string;
 }
 
@@ -214,10 +217,16 @@ export interface RecordAiOverviewPostInput {
   body: string;
 }
 
+export interface AiOverviewPostRecord {
+  gitlabDiscussionId: string;
+  gitlabNoteId: string | null;
+}
+
 export interface AiReviewStore {
   startAiReview(reviewRunId: string): Promise<void>;
   completeAiReview(input: CompleteAiReviewInput): Promise<void>;
   failAiReview(reviewRunId: string, error: Error): Promise<void>;
+  getAiOverviewPost(reviewRunId: string): Promise<AiOverviewPostRecord | null>;
   recordAiFindingPosted(input: PostAiFindingInput): Promise<void>;
   recordAiOverviewPosted(input: RecordAiOverviewPostInput): Promise<void>;
 }
@@ -284,6 +293,7 @@ interface ReviewContextRow {
   target_branch: string;
   source_sha: string;
   target_sha: string;
+  start_sha: string;
   merge_request_url: string;
 }
 interface DiscussionContextRow extends ReviewContextRow { local_discussion_id: string; gitlab_discussion_id: string }
@@ -346,11 +356,7 @@ const rollback = async (client: PoolClient): Promise<void> => {
 };
 
 const sanitizePersistedError = (message: string): string =>
-  message
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
-    .replace(/glpat-[A-Za-z0-9_-]{4,}/g, '[redacted]')
-    .replace(/(api[_-]?key|access[_-]?token|private[_-]?token|authorization)(["'\s:=]+)[^"'\s,}]+/gi, '$1$2[redacted]')
-    .slice(0, 2000);
+  sanitizeSecrets(message).slice(0, 2000);
 
 export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLabReviewStore, AiReviewStore {
   readonly #pool: Pool;
@@ -511,8 +517,8 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       if (!projectId) throw new Error('Project upsert returned no row');
 
       const mr = await client.query<{ id: string }>(
-        `INSERT INTO merge_requests (project_id, gitlab_iid, title, author_username, source_branch, target_branch, source_sha, target_sha, state, web_url)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO merge_requests (project_id, gitlab_iid, title, author_username, source_branch, target_branch, source_sha, target_sha, start_sha, state, web_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (project_id, gitlab_iid) DO UPDATE
          SET title = EXCLUDED.title,
              author_username = EXCLUDED.author_username,
@@ -520,6 +526,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
              target_branch = EXCLUDED.target_branch,
              source_sha = EXCLUDED.source_sha,
              target_sha = EXCLUDED.target_sha,
+             start_sha = EXCLUDED.start_sha,
              state = EXCLUDED.state,
              web_url = EXCLUDED.web_url,
              updated_at = now()
@@ -533,6 +540,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
           input.mergeRequest.targetBranch,
           input.mergeRequest.sourceSha,
           input.mergeRequest.targetSha,
+          input.mergeRequest.startSha,
           input.mergeRequest.state,
           input.mergeRequest.webUrl
         ]
@@ -667,6 +675,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
               mr.target_branch,
               mr.source_sha,
               mr.target_sha,
+              mr.start_sha,
               mr.web_url AS merge_request_url
        FROM review_runs r
        JOIN merge_requests mr ON mr.id = r.merge_request_id
@@ -688,6 +697,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       targetBranch: row.target_branch,
       sourceSha: row.source_sha,
       targetSha: row.target_sha,
+      startSha: row.start_sha,
       mergeRequestUrl: row.merge_request_url
     } : null;
   }
@@ -705,6 +715,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
               mr.target_branch,
               mr.source_sha,
               mr.target_sha,
+              mr.start_sha,
               mr.web_url AS merge_request_url,
               d.id AS local_discussion_id,
               d.gitlab_discussion_id
@@ -729,6 +740,7 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       targetBranch: row.target_branch,
       sourceSha: row.source_sha,
       targetSha: row.target_sha,
+      startSha: row.start_sha,
       mergeRequestUrl: row.merge_request_url,
       localDiscussionId: row.local_discussion_id,
       gitlabDiscussionId: row.gitlab_discussion_id
@@ -879,6 +891,22 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       [reviewRunId, message]
     );
     if ((result.rowCount ?? 0) === 0) throw new Error('Review run not found');
+  }
+
+  async getAiOverviewPost(reviewRunId: string): Promise<AiOverviewPostRecord | null> {
+    const result = await this.#pool.query<{ gitlab_discussion_id: string; gitlab_note_id: string | null }>(
+      `SELECT d.gitlab_discussion_id, c.gitlab_note_id
+       FROM discussions d
+       LEFT JOIN comments c ON c.discussion_id = d.id AND c.author_type = 'hunkwise'
+       WHERE d.review_run_id = $1
+         AND d.idempotency_key = 'ai-overview'
+         AND d.gitlab_discussion_id IS NOT NULL
+       ORDER BY c.created_at NULLS LAST, c.id
+       LIMIT 1`,
+      [reviewRunId]
+    );
+    const row = result.rows[0];
+    return row ? { gitlabDiscussionId: row.gitlab_discussion_id, gitlabNoteId: row.gitlab_note_id } : null;
   }
 
   async recordAiFindingPosted(input: PostAiFindingInput): Promise<void> {

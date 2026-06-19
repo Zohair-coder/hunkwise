@@ -10,6 +10,7 @@ import type {
   GitLabReviewSnapshot,
   GitLabReviewStore,
   HunkwiseStore,
+  AiOverviewPostRecord,
   NewInstanceRecord,
   PostAiFindingInput,
   RecordAiOverviewPostInput,
@@ -29,7 +30,10 @@ const now = new Date().toISOString();
 
 class FakeAiClient implements AiReviewClient {
   calls = 0;
-  constructor(private readonly output: string) {}
+  constructor(private output: string) {}
+  setOutput(output: string): void {
+    this.output = output;
+  }
   async review(): Promise<string> {
     this.calls += 1;
     return this.output;
@@ -44,6 +48,7 @@ class MemoryAiStore implements HunkwiseStore, GitLabReviewStore {
   instance: GitLabInstance;
   context: GitLabReviewContext;
   detail: ReviewDetail;
+  overviewPost: AiOverviewPostRecord | null = null;
   constructor(baseUrl: string) {
     const runId = randomUUID();
     const fileId = randomUUID();
@@ -60,6 +65,7 @@ class MemoryAiStore implements HunkwiseStore, GitLabReviewStore {
       targetBranch: 'main',
       sourceSha: 'head-sha',
       targetSha: 'base-sha',
+      startSha: 'start-sha',
       mergeRequestUrl: `${baseUrl}/group/project/-/merge_requests/7`
     };
     this.detail = {
@@ -134,12 +140,16 @@ class MemoryAiStore implements HunkwiseStore, GitLabReviewStore {
   async failAiReview(_reviewRunId: string, error: Error): Promise<void> {
     this.detail.run = { ...this.detail.run, status: 'failed', errorMessage: error.message, completedAt: now };
   }
+  async getAiOverviewPost(): Promise<AiOverviewPostRecord | null> {
+    return this.overviewPost;
+  }
   async recordAiFindingPosted(input: PostAiFindingInput): Promise<void> {
     this.detail.findings = this.detail.findings.map((finding) => finding.id === input.findingId
       ? { ...finding, gitlabDiscussionId: input.gitlabDiscussionId, gitlabNoteId: input.gitlabNoteId, postedAt: now }
       : finding);
   }
   async recordAiOverviewPosted(input: RecordAiOverviewPostInput): Promise<void> {
+    this.overviewPost = { gitlabDiscussionId: input.gitlabDiscussionId, gitlabNoteId: input.gitlabNoteId };
     const discussionId = randomUUID();
     this.detail.discussions.push({ id: discussionId, reviewRunId: input.reviewRunId, findingId: null, gitlabDiscussionId: input.gitlabDiscussionId, resolved: false, createdAt: now });
     this.detail.comments.push({ id: randomUUID(), discussionId, authorType: 'hunkwise', authorName: 'Hunkwise', body: input.body, gitlabNoteId: input.gitlabNoteId, createdAt: now });
@@ -230,7 +240,7 @@ describe('AI review API', () => {
     expect(postedResponse.statusCode).toBe(201);
     expect(postedResponse.json<AiReviewPostResponse>().items).toHaveLength(2);
     expect(posted).toHaveLength(2);
-    expect(posted[1]).toMatchObject({ position: { base_sha: 'base-sha', head_sha: 'head-sha', new_line: 2 } });
+    expect(posted[1]).toMatchObject({ position: { base_sha: 'base-sha', start_sha: 'start-sha', head_sha: 'head-sha', new_line: 2 } });
 
     const duplicate = await app.inject({
       method: 'POST',
@@ -239,6 +249,48 @@ describe('AI review API', () => {
     });
     expect(duplicate.json<AiReviewPostResponse>().items.every((item) => item.skipped)).toBe(true);
     expect(posted).toHaveLength(2);
+    await app.close();
+  });
+
+  it('posts overview-only once and skips after rerun changes the overview body', async () => {
+    const aiClient = new FakeAiClient(JSON.stringify({
+      summary: 'Initial summary',
+      overviewCommentBody: 'Initial overview',
+      findings: []
+    }));
+    const store = new MemoryAiStore(baseUrl);
+    const app = await buildApp({
+      store,
+      cipher: new AesGcmSecretCipher(Buffer.alloc(32, 4).toString('base64')),
+      gitlabReview: new GitLabReviewService(store, new StaticCredentials(), { aiClient, aiModel: 'gpt-test' })
+    });
+
+    const firstRun = await app.inject({ method: 'POST', url: `/api/reviews/${store.detail.run.id}/ai-review`, payload: { force: true } });
+    expect(firstRun.statusCode).toBe(202);
+    const firstPost = await app.inject({
+      method: 'POST',
+      url: `/api/reviews/${store.detail.run.id}/ai-review/post`,
+      payload: { includeOverview: true, findingIds: [] }
+    });
+    expect(firstPost.statusCode).toBe(201);
+    expect(firstPost.json<AiReviewPostResponse>().items).toMatchObject([{ findingId: null, skipped: false, gitlabDiscussionId: 'discussion-1' }]);
+    expect(posted).toHaveLength(1);
+
+    aiClient.setOutput(JSON.stringify({
+      summary: 'Changed summary',
+      overviewCommentBody: 'Changed overview',
+      findings: []
+    }));
+    const rerun = await app.inject({ method: 'POST', url: `/api/reviews/${store.detail.run.id}/ai-review`, payload: { force: true } });
+    expect(rerun.statusCode).toBe(202);
+    const secondPost = await app.inject({
+      method: 'POST',
+      url: `/api/reviews/${store.detail.run.id}/ai-review/post`,
+      payload: { includeOverview: true, findingIds: [] }
+    });
+    expect(secondPost.statusCode).toBe(201);
+    expect(secondPost.json<AiReviewPostResponse>().items).toMatchObject([{ findingId: null, skipped: true, reason: 'already_posted', gitlabDiscussionId: 'discussion-1' }]);
+    expect(posted).toHaveLength(1);
     await app.close();
   });
 

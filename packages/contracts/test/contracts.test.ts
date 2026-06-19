@@ -8,6 +8,7 @@ import {
   gitLabWebhookResponseSchema,
   postAiReviewSchema,
   reviewRunReferenceSchema,
+  sanitizeSecrets,
   submitReviewSchema,
   triggerAiReviewSchema,
   updateDiscussionResolutionSchema,
@@ -104,5 +105,26 @@ describe('API contracts', () => {
       status: 'open',
       createdAt: '2026-01-01T00:00:00.000Z'
     }).category).toBe('bug');
+  });
+
+  it('redacts common secret patterns for prompts and persisted errors', () => {
+    const sanitized = sanitizeSecrets([
+      'APP_ENCRYPTION_KEY=base64-secret',
+      'GITLAB_WEBHOOK_SECRET=webhook-secret',
+      'DATABASE_URL=postgres://user:pass@localhost:5432/hunkwise',
+      'CUSTOM_API_KEY="custom-key"',
+      'token=plain-token',
+      'https://gitlab.example.com?private_token=glpat-hidden1234',
+      'v1:aaaaaaaa:bbbbbbbb:cccccccc',
+      'sk-secret12345678'
+    ].join('\n'));
+    expect(sanitized).not.toContain('base64-secret');
+    expect(sanitized).not.toContain('webhook-secret');
+    expect(sanitized).not.toContain('user:pass');
+    expect(sanitized).not.toContain('custom-key');
+    expect(sanitized).not.toContain('plain-token');
+    expect(sanitized).not.toContain('glpat-hidden1234');
+    expect(sanitized).not.toContain('v1:aaaaaaaa:bbbbbbbb:cccccccc');
+    expect(sanitized).not.toContain('sk-secret12345678');
   });
 });

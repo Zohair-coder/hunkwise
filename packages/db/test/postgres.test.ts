@@ -31,7 +31,7 @@ beforeEach(async () => {
 async function createRuns(): Promise<{ first: string; second: string; firstHunk: string; secondHunk: string }> {
   const instance = await pool.query<{ id: string }>("INSERT INTO gitlab_instances (name, base_url, access_token_ciphertext) VALUES ('Test', 'https://gitlab.test', 'v1:ciphertext') RETURNING id");
   const project = await pool.query<{ id: string }>("INSERT INTO projects (instance_id, gitlab_id, path_with_namespace, web_url) VALUES ($1, 1, 'group/project', 'https://gitlab.test/group/project') RETURNING id", [instance.rows[0]?.id]);
-  const mr = await pool.query<{ id: string }>("INSERT INTO merge_requests (project_id, gitlab_iid, title, author_username, source_branch, target_branch, source_sha, target_sha, state, web_url) VALUES ($1, 1, 'MR', 'author', 'feature', 'main', 'source', 'target', 'open', 'https://gitlab.test/group/project/-/merge_requests/1') RETURNING id", [project.rows[0]?.id]);
+  const mr = await pool.query<{ id: string }>("INSERT INTO merge_requests (project_id, gitlab_iid, title, author_username, source_branch, target_branch, source_sha, target_sha, start_sha, state, web_url) VALUES ($1, 1, 'MR', 'author', 'feature', 'main', 'source', 'target', 'start', 'open', 'https://gitlab.test/group/project/-/merge_requests/1') RETURNING id", [project.rows[0]?.id]);
   const run1 = await pool.query<{ id: string }>("INSERT INTO review_runs (merge_request_id, status, source_sha, created_at) VALUES ($1, 'completed', 'source-1', '2026-01-01T00:00:00Z') RETURNING id", [mr.rows[0]?.id]);
   const run2 = await pool.query<{ id: string }>("INSERT INTO review_runs (merge_request_id, status, source_sha, created_at) VALUES ($1, 'completed', 'source-2', '2026-01-01T00:00:00Z') RETURNING id", [mr.rows[0]?.id]);
   const file1 = await pool.query<{ id: string }>("INSERT INTO diff_files (review_run_id, new_path, status, additions, deletions) VALUES ($1, 'one.ts', 'modified', 1, 0) RETURNING id", [run1.rows[0]?.id]);
@@ -52,7 +52,8 @@ describe('PostgreSQL persistence', () => {
       '004_case_insensitive_gitlab_base_url.sql',
       '005_gitlab_webhook_events.sql',
       '006_gitlab_webhook_processing_state.sql',
-      '007_ai_review_results.sql'
+      '007_ai_review_results.sql',
+      '008_merge_request_start_sha.sql'
     ]);
     expect(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
   });
@@ -106,6 +107,7 @@ describe('PostgreSQL persistence', () => {
         targetBranch: 'main',
         sourceSha: 'head-sha',
         targetSha: 'base-sha',
+        startSha: 'start-sha',
         state: 'open',
         webUrl: 'https://gitlab.snapshot.test/group/project/-/merge_requests/7'
       },
@@ -144,6 +146,7 @@ describe('PostgreSQL persistence', () => {
     expect(detail?.hunks).toMatchObject([{ header: '@@ -1 +1 @@', position: 0 }]);
     expect(detail?.discussions).toMatchObject([{ gitlabDiscussionId: 'discussion-1', resolved: false }]);
     expect(detail?.comments).toMatchObject([{ body: 'Existing', gitlabNoteId: 'note-1' }, { body: 'Follow-up', gitlabNoteId: 'note-2' }]);
+    expect(await store.getReviewContext(first.runId)).toMatchObject({ targetSha: 'base-sha', startSha: 'start-sha' });
 
     await store.failAiReview(first.runId, new Error('invalid model output'));
     const afterFailedAi = await store.upsertGitLabReviewSnapshot(snapshot);
@@ -164,6 +167,7 @@ describe('PostgreSQL persistence', () => {
         targetBranch: 'main',
         sourceSha: 'head-sha',
         targetSha: 'base-sha',
+        startSha: 'start-sha',
         state: 'open',
         webUrl: 'https://gitlab.ai.test/group/project/-/merge_requests/7'
       },
@@ -212,6 +216,7 @@ describe('PostgreSQL persistence', () => {
     await store.recordAiFindingPosted({ reviewRunId: run.runId, findingId, gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-1' });
     await store.recordAiOverviewPosted({ reviewRunId: run.runId, gitlabDiscussionId: 'overview-1', gitlabNoteId: 'overview-note-1', body: 'Overview body' });
     await store.recordAiOverviewPosted({ reviewRunId: run.runId, gitlabDiscussionId: 'overview-1', gitlabNoteId: 'overview-note-1', body: 'Overview body' });
+    expect(await store.getAiOverviewPost(run.runId)).toEqual({ gitlabDiscussionId: 'overview-1', gitlabNoteId: 'overview-note-1' });
 
     const posted = await store.getReview(run.runId);
     expect(posted?.findings[0]).toMatchObject({ gitlabDiscussionId: 'discussion-1', gitlabNoteId: 'note-1' });
@@ -219,6 +224,12 @@ describe('PostgreSQL persistence', () => {
     expect(posted?.discussions.filter((discussion) => discussion.gitlabDiscussionId === 'overview-1')).toHaveLength(1);
     expect(posted?.comments.filter((comment) => comment.gitlabNoteId === 'note-1')).toHaveLength(1);
     expect(posted?.comments.filter((comment) => comment.gitlabNoteId === 'overview-note-1')).toHaveLength(1);
+
+    await store.failAiReview(run.runId, new Error('DATABASE_URL=postgres://user:pass@db/hunkwise APP_ENCRYPTION_KEY=super-secret v1:aaa:bbb:ccc'));
+    const failed = await store.getReview(run.runId);
+    expect(failed?.run.errorMessage).not.toContain('user:pass');
+    expect(failed?.run.errorMessage).not.toContain('super-secret');
+    expect(failed?.run.errorMessage).not.toContain('v1:aaa:bbb:ccc');
   });
 
   it('retries failed webhook events and suppresses only completed duplicates', async () => {

@@ -10,7 +10,7 @@ import type {
   SubmitReview,
   TestGitLabInstanceResponse
 } from '@hunkwise/contracts';
-import type { GitLabInstance } from '@hunkwise/contracts';
+import { sanitizeSecrets, type GitLabInstance } from '@hunkwise/contracts';
 import type { AiReviewStore, GitLabReviewSnapshot, GitLabReviewStore, HunkwiseStore } from '@hunkwise/db';
 import {
   type AiReviewClient,
@@ -138,11 +138,15 @@ export class GitLabReviewService implements GitLabReviewActions {
 
     if (input.includeOverview) {
       const overviewBody = detail.run.overviewCommentBody;
-      const alreadyPosted = overviewBody
-        ? detail.discussions.some((discussion) => discussion.gitlabDiscussionId && detail.comments.some((comment) => comment.discussionId === discussion.id && comment.authorType === 'hunkwise' && comment.body === overviewBody))
-        : false;
-      if (alreadyPosted) {
-        items.push({ findingId: null, gitlabDiscussionId: null, skipped: true, reason: 'already_posted' });
+      const existingOverview = await this.#store.getAiOverviewPost(reviewRunId);
+      if (existingOverview) {
+        items.push({
+          findingId: null,
+          gitlabDiscussionId: existingOverview.gitlabDiscussionId,
+          gitlabNoteId: existingOverview.gitlabNoteId,
+          skipped: true,
+          reason: 'already_posted'
+        });
       } else if (!overviewBody) {
         items.push({ findingId: null, gitlabDiscussionId: null, skipped: true, reason: 'missing_review_result' });
       } else {
@@ -277,6 +281,7 @@ export class GitLabReviewService implements GitLabReviewActions {
         targetBranch: mergeRequest.target_branch,
         sourceSha: mergeRequest.sha ?? mergeRequest.diff_refs?.head_sha ?? 'unknown',
         targetSha: mergeRequest.diff_refs?.base_sha ?? mergeRequest.diff_refs?.start_sha ?? 'unknown',
+        startSha: mergeRequest.diff_refs?.start_sha ?? mergeRequest.diff_refs?.base_sha ?? 'unknown',
         state: mergeRequestState(mergeRequest),
         webUrl: mergeRequest.web_url
       },
@@ -360,11 +365,7 @@ const webhookTarget = (payload: unknown): { projectPath: string; mergeRequestIid
 
 const sanitizeServiceError = (error: unknown): Error => {
   const message = error instanceof Error ? error.message : 'AI review failed';
-  return new Error(message
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
-    .replace(/glpat-[A-Za-z0-9_-]{4,}/g, '[redacted]')
-    .replace(/(api[_-]?key|access[_-]?token|private[_-]?token|authorization)(["'\s:=]+)[^"'\s,}]+/gi, '$1$2[redacted]')
-    .slice(0, 2000));
+  return new Error(sanitizeSecrets(message).slice(0, 2000));
 };
 
 const findingCommentBody = (finding: Finding): string => {

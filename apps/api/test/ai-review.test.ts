@@ -29,6 +29,7 @@ const context: GitLabReviewContext = {
   targetBranch: 'main',
   sourceSha: 'head-sha',
   targetSha: 'base-sha',
+  startSha: 'start-sha',
   mergeRequestUrl: 'https://gitlab.example.com/group/project/-/merge_requests/7'
 };
 
@@ -56,7 +57,7 @@ const detail: ReviewDetail = {
     newStart: 10,
     newLines: 4,
     header: '@@ -10,3 +10,4 @@',
-    patch: '@@ -10,3 +10,4 @@\n const keep = true;\n-oldSecret(glpat-token1234)\n+newSafe();\n+console.log("sk-secret12345678")',
+    patch: '@@ -10,3 +10,8 @@\n const keep = true;\n-oldSecret(glpat-token1234)\n+newSafe();\n+console.log("sk-secret12345678")\n+APP_ENCRYPTION_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\n+GITLAB_WEBHOOK_SECRET=webhook-secret-value\n+DATABASE_URL=postgres://user:pass@localhost:5432/hunkwise\n+ENCRYPTED=v1:aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb:cccccccccccccccc',
     position: 0
   }],
   findings: [],
@@ -72,6 +73,10 @@ describe('AI review helpers', () => {
     expect(prompt.user).toContain('[redacted-gitlab-token]');
     expect(prompt.user).not.toContain('sk-secret12345678');
     expect(prompt.user).not.toContain('glpat-token1234');
+    expect(prompt.user).not.toContain('webhook-secret-value');
+    expect(prompt.user).not.toContain('postgres://user:pass@');
+    expect(prompt.user).not.toContain('v1:aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb:cccccccccccccccc');
+    expect(prompt.user).not.toContain('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=');
     expect(prompt.user).toContain('existingDiscussions');
     expect(prompt.metadata).toMatchObject({ includedFiles: 1, includedHunks: 1, truncatedHunks: 1, maxPatchCharacters: 70 });
   });
@@ -103,11 +108,15 @@ describe('AI review helpers', () => {
       [10, 10],
       [11, null],
       [null, 11],
-      [null, 12]
+      [null, 12],
+      [null, 13],
+      [null, 14],
+      [null, 15],
+      [null, 16]
     ]);
     expect(gitLabPositionForFinding(detail, context, 'src/a.ts', 12)).toEqual({
       baseSha: 'base-sha',
-      startSha: 'base-sha',
+      startSha: 'start-sha',
       headSha: 'head-sha',
       oldPath: 'src/a.ts',
       newPath: 'src/a.ts',
