@@ -1,5 +1,5 @@
 import process from 'node:process';
-import { PostgresStore } from '@hunkwise/db';
+import { PostgresStore, postgresSsl } from '@hunkwise/db';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { AesGcmSecretCipher } from './crypto.js';
@@ -11,7 +11,7 @@ const store = new PostgresStore({
   max: 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,
-  ssl: config.NODE_ENV === 'production' && !config.DATABASE_URL.includes('postgres:5432') ? { rejectUnauthorized: true } : false
+  ssl: postgresSsl(config.DATABASE_SSL_MODE)
 });
 const app = await buildApp(
   {
@@ -54,4 +54,3 @@ try {
   await store.close();
   process.exit(1);
 }
-

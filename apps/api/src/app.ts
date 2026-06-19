@@ -35,7 +35,7 @@ class HttpError extends Error {
 
 const idParams = (params: unknown): string => {
   const value = params as { id?: unknown };
-  if (typeof value.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.id)) {
+  if (typeof value.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.id)) {
     throw new HttpError(400, 'invalid_request', 'A valid UUID is required');
   }
   return value.id;
@@ -43,6 +43,9 @@ const idParams = (params: unknown): string => {
 
 const isPgUniqueViolation = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
+
+type FastifyClientError = Error & { code?: string; statusCode?: number };
+const isFastifyClientError = (error: unknown): error is FastifyClientError => error instanceof Error;
 
 export async function buildApp(dependencies: AppDependencies, options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
@@ -84,6 +87,18 @@ export async function buildApp(dependencies: AppDependencies, options: BuildAppO
       statusCode = 409;
       code = 'conflict';
       message = 'A resource with these values already exists';
+    } else if (isFastifyClientError(error) && error.code === 'FST_ERR_CTP_INVALID_JSON_BODY') {
+      statusCode = 400;
+      code = 'invalid_json';
+      message = 'Request body contains malformed JSON';
+    } else if (isFastifyClientError(error) && (error.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || error.statusCode === 413)) {
+      statusCode = 413;
+      code = 'payload_too_large';
+      message = 'Request body exceeds the 1 MiB limit';
+    } else if (isFastifyClientError(error) && error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500) {
+      statusCode = error.statusCode;
+      code = 'bad_request';
+      message = statusCode === 400 ? 'Bad request' : error.message;
     } else {
       request.log.error({ err: error }, 'request failed');
     }
@@ -96,7 +111,14 @@ export async function buildApp(dependencies: AppDependencies, options: BuildAppO
       await dependencies.store.ping();
       return { status: 'ready', checks: { database: 'ok' } };
     } catch {
-      return reply.status(503).send({ status: 'not_ready', checks: { database: 'unavailable' } });
+      return reply.status(503).send({
+        error: {
+          code: 'dependency_unavailable',
+          message: 'PostgreSQL is unavailable',
+          details: { checks: { database: 'unavailable' } },
+          requestId: _request.id
+        }
+      });
     }
   });
 

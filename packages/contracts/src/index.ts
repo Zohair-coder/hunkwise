@@ -4,7 +4,10 @@ const id = z.string().uuid();
 const timestamp = z.string().datetime({ offset: true });
 const nonEmpty = z.string().trim().min(1);
 const usesHttp = (value: string): boolean => {
-  try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && url.username === '' && url.password === '';
+  } catch { return false; }
 };
 const httpUrl = z.string().url().refine(usesHttp, 'Must use HTTP(S)');
 
@@ -166,6 +169,17 @@ export const reviewListSchema = z.object({
   offset: z.number().int().nonnegative()
 });
 export type ReviewList = z.infer<typeof reviewListSchema>;
+
+export const reviewDetailSchema = z.object({
+  run: reviewRunSchema,
+  files: z.array(diffFileSchema),
+  hunks: z.array(diffHunkSchema),
+  findings: z.array(findingSchema),
+  discussions: z.array(discussionSchema),
+  comments: z.array(commentSchema),
+  chatMessages: z.array(chatMessageSchema)
+});
+export type ReviewDetail = z.infer<typeof reviewDetailSchema>;
 
 export const errorResponseSchema = z.object({
   error: z.object({

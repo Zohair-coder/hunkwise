@@ -24,6 +24,7 @@ services:
       PORT: 3000
       LOG_LEVEL: info
       DATABASE_URL: postgres://hunkwise:${POSTGRES_PASSWORD:-hunkwise-local-only}@postgres:5432/hunkwise
+      DATABASE_SSL_MODE: disable
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?Set APP_ENCRYPTION_KEY to a base64-encoded 32-byte key}
     command: ["sh", "-c", "node packages/db/dist/migrate.js && node apps/api/dist/main.js"]
     ports:
@@ -41,4 +42,3 @@ services:
 
 volumes:
   postgres-data:
-

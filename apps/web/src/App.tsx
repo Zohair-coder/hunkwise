@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { GitLabInstance, ReviewRun } from '@hunkwise/contracts';
+import type { DiffFile, GitLabInstance, ReviewDetail, ReviewRun } from '@hunkwise/contracts';
 import { api, ApiError } from './api.js';
 
 type LoadState =
@@ -113,52 +113,76 @@ function Landing({ state, onSelect, onPreview }: { state: LoadState; onSelect: (
   </main>;
 }
 
-const exampleFiles = [
-  { name: 'src/auth/session.ts', value: '+38 −12', active: true },
-  { name: 'src/api/reviews.ts', value: '+24 −4' },
-  { name: 'test/session.test.ts', value: '+61 −0' },
-  { name: 'package.json', value: '+2 −2' }
-];
+type DetailState = { kind: 'loading' } | { kind: 'error'; message: string } | { kind: 'ready'; detail: ReviewDetail } | { kind: 'preview' };
+type MobilePane = 'files' | 'diff' | 'activity';
 
-function ReviewShell({ review, onBack }: { review?: ReviewRun; onBack: () => void }) {
-  const status = review?.status ?? 'running';
+const PanelState = ({ title, body, error = false }: { title: string; body: string; error?: boolean }) =>
+  <div className={`panel-state${error ? ' panel-error' : ''}`}><Icon>{error ? '!' : '⌁'}</Icon><strong>{title}</strong><p>{body}</p></div>;
+
+function ReviewShell({ reviewId, onBack }: { reviewId?: string; onBack: () => void }) {
+  const [state, setState] = useState<DetailState>(reviewId ? { kind: 'loading' } : { kind: 'preview' });
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const [activityTab, setActivityTab] = useState<'findings' | 'chat'>('findings');
+  const [mobilePane, setMobilePane] = useState<MobilePane>('diff');
+  useEffect(() => {
+    if (!reviewId) return;
+    let active = true;
+    setState({ kind: 'loading' });
+    void api.review(reviewId).then((detail) => {
+      if (!active) return;
+      setState({ kind: 'ready', detail });
+      setSelectedFileId(detail.files[0]?.id ?? null);
+    }).catch((error: unknown) => {
+      if (active) setState({ kind: 'error', message: error instanceof Error ? error.message : 'Unknown error' });
+    });
+    return () => { active = false; };
+  }, [reviewId]);
+
+  const detail = state.kind === 'ready' ? state.detail : null;
+  const selectedFile: DiffFile | undefined = detail?.files.find((file) => file.id === selectedFileId);
+  const selectedHunks = selectedFile ? detail?.hunks.filter((hunk) => hunk.diffFileId === selectedFile.id) ?? [] : [];
+  const title = detail ? `Review ${detail.run.id.slice(0, 8)}` : reviewId ? 'Loading review…' : 'Review workspace';
   return <main className="shell-page">
     <div className="shell-header">
       <button className="back" onClick={onBack}>← All reviews</button>
-      <div><span className="eyebrow">group / project</span><h1>Harden session token validation</h1></div>
-      <div className="shell-meta"><StatusPill status={status} /><span>MR !42</span><span>8 files</span></div>
+      <div><span className="eyebrow">Persisted review data</span><h1>{title}</h1></div>
+      <div className="shell-meta">{detail && <><StatusPill status={detail.run.status} /><span>{detail.files.length} files</span><span>{detail.findings.length} findings</span></>}</div>
     </div>
+    <nav className="mobile-tabs" aria-label="Review workspace panels">
+      {(['files', 'diff', 'activity'] as const).map((pane) => <button key={pane} className={mobilePane === pane ? 'active' : ''} onClick={() => setMobilePane(pane)}>{pane === 'activity' ? 'Findings & chat' : pane}</button>)}
+    </nav>
     <div className="review-shell">
-      <aside className="files-panel">
-        <div className="panel-title"><span>Changed files</span><small>8</small></div>
+      <aside className={`files-panel${mobilePane === 'files' ? ' mobile-active' : ''}`}>
+        <div className="panel-title"><span>Changed files</span><small>{detail?.files.length ?? 0}</small></div>
         <div className="file-filter">⌕ <span>Filter files</span></div>
-        {exampleFiles.map((file) => <button className={file.active ? 'active' : ''} key={file.name}><span>TS</span><span>{file.name}</span><small>{file.value}</small></button>)}
+        {state.kind === 'loading' && <PanelState title="Loading files" body="Fetching persisted review detail…" />}
+        {state.kind === 'error' && <PanelState error title="Files unavailable" body={state.message} />}
+        {(state.kind === 'preview' || (detail && detail.files.length === 0)) && <PanelState title="No changed files" body={state.kind === 'preview' ? 'Select a persisted review to inspect its files.' : 'No diff files have been stored for this run yet.'} />}
+        {detail?.files.map((file) => <button className={file.id === selectedFileId ? 'active' : ''} onClick={() => { setSelectedFileId(file.id); setMobilePane('diff'); }} key={file.id}><span>{file.status.slice(0, 1).toUpperCase()}</span><span>{file.newPath}</span><small>+{file.additions} −{file.deletions}</small></button>)}
       </aside>
-      <section className="diff-panel">
-        <div className="diff-toolbar"><span>src/auth/session.ts</span><div><button>Unified</button><button>⋯</button></div></div>
-        <div className="hunk-title">@@ -18,8 +18,12 @@ export function verifySession(token: string)</div>
-        <div className="code-line neutral"><b>18</b><b>18</b><code>const payload = decode(token)</code></div>
-        <div className="code-line removed"><b>19</b><b></b><code>- if (!payload) return null</code></div>
-        <div className="code-line added"><b></b><b>19</b><code>+ if (!payload || payload.expiresAt &lt; Date.now()) &#123;</code></div>
-        <div className="code-line added"><b></b><b>20</b><code>+   return null</code></div>
-        <div className="code-line added"><b></b><b>21</b><code>+ &#125;</code></div>
-        <div className="finding-card">
-          <div><span className="finding-severity">High confidence</span><small>Security · line 19</small></div>
-          <strong>Validate the token signature before trusting claims</strong>
-          <p>The expiration guard is useful, but decoded claims remain attacker-controlled until signature verification succeeds.</p>
-          <div><button>Dismiss</button><button>Discuss finding</button></div>
-        </div>
-        <div className="code-line neutral"><b>20</b><b>23</b><code>return payload</code></div>
+      <section className={`diff-panel${mobilePane === 'diff' ? ' mobile-active' : ''}`}>
+        <div className="diff-toolbar"><span>{selectedFile?.newPath ?? 'Diff'}</span><div><span className="quiet">Persisted patch</span></div></div>
+        {state.kind === 'loading' && <PanelState title="Loading review" body="Fetching run, diffs, findings, and messages…" />}
+        {state.kind === 'error' && <PanelState error title="Review unavailable" body={state.message} />}
+        {state.kind === 'preview' && <PanelState title="No review selected" body="This shell displays only data returned by the review detail API." />}
+        {detail && !selectedFile && <PanelState title="No diff available" body="This review run does not have any persisted diff files yet." />}
+        {selectedFile && selectedHunks.length === 0 && <PanelState title="No hunks available" body="The file exists, but no persisted hunks are available." />}
+        {selectedHunks.map((hunk) => <div className="persisted-hunk" key={hunk.id}><div className="hunk-title">{hunk.header}</div><pre>{hunk.patch}</pre></div>)}
       </section>
-      <aside className="activity-panel">
-        <div className="activity-tabs"><button className="active">Findings <span>3</span></button><button>Chat</button></div>
-        <div className="summary-block"><span className="eyebrow">Review summary</span><h3>One issue needs attention</h3><p>Session handling is clearer, but verification order can allow untrusted claims into the request path.</p></div>
-        <div className="finding-list">
-          <button className="selected"><i className="critical" /><span><strong>Unverified token claims</strong><small>session.ts · L19</small></span><em>→</em></button>
-          <button><i /><span><strong>Missing negative test</strong><small>session.test.ts · L44</small></span><em>→</em></button>
-          <button><i className="info" /><span><strong>Error context is dropped</strong><small>reviews.ts · L78</small></span><em>→</em></button>
-        </div>
-        <div className="chat-box"><textarea aria-label="Ask about this review" placeholder="Ask about the diff…" /><button aria-label="Send message">↑</button><small>Grounded in this merge request</small></div>
+      <aside className={`activity-panel${mobilePane === 'activity' ? ' mobile-active' : ''}`}>
+        <div className="activity-tabs"><button className={activityTab === 'findings' ? 'active' : ''} onClick={() => setActivityTab('findings')}>Findings <span>{detail?.findings.length ?? 0}</span></button><button className={activityTab === 'chat' ? 'active' : ''} onClick={() => setActivityTab('chat')}>Chat <span>{detail?.chatMessages.length ?? 0}</span></button></div>
+        <div className="summary-block"><span className="eyebrow">Review summary</span><h3>{detail ? `${detail.run.status[0]?.toUpperCase()}${detail.run.status.slice(1)} run` : 'No review loaded'}</h3><p>{detail?.run.summary ?? 'A summary has not been generated for this review run.'}</p></div>
+        {activityTab === 'findings' && <div className="finding-list">
+          {state.kind === 'loading' && <PanelState title="Loading findings" body="Fetching persisted findings…" />}
+          {state.kind === 'error' && <PanelState error title="Findings unavailable" body={state.message} />}
+          {(state.kind === 'preview' || (detail && detail.findings.length === 0)) && <PanelState title="No findings" body={state.kind === 'preview' ? 'Select a review to inspect findings.' : 'No findings have been persisted for this run.'} />}
+          {detail?.findings.map((finding) => <div className="finding-row" key={finding.id}><i className={finding.severity} /><span><strong>{finding.title}</strong><small>{finding.filePath}{finding.line ? ` · L${finding.line}` : ''}</small><p>{finding.body}</p></span></div>)}
+        </div>}
+        {activityTab === 'chat' && <div className="chat-history">
+          {detail?.chatMessages.map((message) => <div className={`chat-message ${message.role}`} key={message.id}><strong>{message.role}</strong><p>{message.content}</p></div>)}
+          {(state.kind !== 'ready' || (detail?.chatMessages.length ?? 0) === 0) && <PanelState title="No chat messages" body="No chat messages have been persisted for this run." />}
+        </div>}
+        <div className="chat-box"><textarea aria-label="Ask about this review" disabled placeholder="Chat arrives in a later slice" /><button aria-label="Send message" disabled>↑</button><small>Read-only in Slice 1</small></div>
       </aside>
     </div>
   </main>;
@@ -166,7 +190,7 @@ function ReviewShell({ review, onBack }: { review?: ReviewRun; onBack: () => voi
 
 export default function App() {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
-  const [selected, setSelected] = useState<ReviewRun | 'preview' | null>(null);
+  const [selected, setSelected] = useState<{ kind: 'review'; id: string } | { kind: 'preview' } | null>(null);
   useEffect(() => {
     let active = true;
     void Promise.all([api.reviews(), api.instances()]).then(([reviews, instances]) => {
@@ -178,7 +202,7 @@ export default function App() {
   }, []);
   return <div className="app">
     <Header onHome={() => setSelected(null)} />
-    {selected ? <ReviewShell {...(selected === 'preview' ? {} : { review: selected })} onBack={() => setSelected(null)} /> :
-      <Landing state={state} onSelect={setSelected} onPreview={() => setSelected('preview')} />}
+    {selected ? <ReviewShell {...(selected.kind === 'review' ? { reviewId: selected.id } : {})} onBack={() => setSelected(null)} /> :
+      <Landing state={state} onSelect={(review) => setSelected({ kind: 'review', id: review.id })} onPreview={() => setSelected({ kind: 'preview' })} />}
   </div>;
 }

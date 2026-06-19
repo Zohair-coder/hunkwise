@@ -18,16 +18,16 @@ apps/api  ───────► packages/contracts
 - `apps/api`: Fastify composition root, REST routes, AES-256-GCM secret boundary, health checks, and downstream interfaces.
 - `apps/web`: React/Vite landing page and responsive three-column review workspace.
 
-GitLab tokens cross the API only on instance create/update. They are encrypted before the store receives them, using a versioned AES-256-GCM envelope with a random nonce. Responses expose only `hasAccessToken`. Back up `APP_ENCRYPTION_KEY` securely; changing it makes existing credentials unreadable. Production deployments should inject it from a secret manager.
+GitLab tokens cross the API only on instance create/update. They are encrypted before the store receives them, using a versioned AES-256-GCM envelope with a random nonce. Responses expose only `hasAccessToken`. A separate `InstanceSecretStore` capability and `InstanceCredentialProvider` form the narrow retrieval/decryption boundary for a future outbound GitLab adapter; public DTOs never carry tokens. Back up `APP_ENCRYPTION_KEY` securely; changing it makes existing credentials unreadable. Production deployments should inject it from a secret manager.
 
 ## Local development
 
-Prerequisites: Node.js 22, npm, and PostgreSQL 15 or newer.
+Prerequisites: Node.js 22, npm, PostgreSQL 15 or newer, and Docker for the PostgreSQL integration tests.
 
 ```bash
 npm install
 cp .env.example .env
-# Set DATABASE_URL and generate APP_ENCRYPTION_KEY with: openssl rand -base64 32
+# Set DATABASE_URL, DATABASE_SSL_MODE, and generate APP_ENCRYPTION_KEY with: openssl rand -base64 32
 set -a && source .env && set +a
 npm run db:migrate
 npm run dev
@@ -54,7 +54,7 @@ export APP_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 docker compose up --build
 ```
 
-The app applies migrations under a PostgreSQL advisory lock, then serves the API and built frontend at `http://localhost:3000`. The Compose password is for local use; set `POSTGRES_PASSWORD` outside local development. The app container runs as an unprivileged user.
+The app applies checksum-verified migrations under a PostgreSQL advisory lock, then serves the API and built frontend at `http://localhost:3000`. Compose explicitly uses `DATABASE_SSL_MODE=disable` for its private local network. Production defaults to `verify-full`; `require` and `disable` must be selected explicitly when certificate verification is not available. The Compose password is for local use; set `POSTGRES_PASSWORD` outside local development. The app container runs as an unprivileged user.
 
 ## REST contracts
 
@@ -65,16 +65,16 @@ The app applies migrations under a PostgreSQL advisory lock, then serves the API
 | `GET/POST` | `/api/instances` | List/create GitLab instances |
 | `GET/PATCH/DELETE` | `/api/instances/:id` | Instance CRUD; tokens are never returned |
 | `GET` | `/api/reviews?limit=&offset=` | Paginated review-run list |
-| `GET` | `/api/reviews/:id` | Review-run detail |
+| `GET` | `/api/reviews/:id` | Snapshot-consistent run, files, hunks, findings, discussions, comments, and chat detail |
 | `POST` | `/api/reviews` | Validates MR submission; `501` until Slice 2 |
 
-All errors use `{ "error": { "code", "message", "requestId", "details?" } }`. Request IDs are returned as `x-request-id`. Bodies are limited to 1 MiB and security headers are enabled.
+All errors, including readiness failures, malformed JSON, body-limit failures, and invalid identifiers, use `{ "error": { "code", "message", "requestId", "details?" } }`. Request IDs are returned as `x-request-id`. Bodies are limited to 1 MiB and security headers are enabled.
 
 ## Operational notes
 
 - Liveness does not touch dependencies; readiness verifies PostgreSQL.
 - The process handles `SIGINT`/`SIGTERM`, stops accepting traffic, drains Fastify, and closes the pool.
-- Migrations are append-only SQL in `packages/db/migrations` and tracked in `schema_migrations`.
+- Migrations are append-only SQL in `packages/db/migrations`; `schema_migrations` stores a SHA-256 checksum and startup rejects modified applied migrations.
+- Idle PostgreSQL pool errors are handled without terminating the API. Liveness remains process-only; readiness reports database outages and recovers when PostgreSQL returns.
 - Keep TLS termination in front of the service. Configure PostgreSQL TLS in hosted deployments; the application rejects invalid certificates for non-Compose production database URLs.
 - No OpenAI credential is read, documented, or required in this slice.
-

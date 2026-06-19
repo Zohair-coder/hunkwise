@@ -1,4 +1,4 @@
-import type { ErrorResponse, GitLabInstance, ReviewList, SubmitReview } from '@hunkwise/contracts';
+import type { ErrorResponse, GitLabInstance, ReviewDetail, ReviewList, SubmitReview } from '@hunkwise/contracts';
 
 export class ApiError extends Error {
   constructor(readonly code: string, message: string, readonly requestId?: string) {
@@ -25,6 +25,6 @@ export const api = {
     return result.items;
   },
   reviews: (): Promise<ReviewList> => request('/api/reviews?limit=20&offset=0'),
+  review: (id: string): Promise<ReviewDetail> => request(`/api/reviews/${encodeURIComponent(id)}`),
   submit: (input: SubmitReview): Promise<{ runId: string }> => request('/api/reviews', { method: 'POST', body: JSON.stringify(input) })
 };
-

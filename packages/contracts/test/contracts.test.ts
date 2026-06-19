@@ -11,6 +11,11 @@ describe('API contracts', () => {
     expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: 'ftp://gitlab.example.com', accessToken: 'secret' }).success).toBe(false);
   });
 
+  it('rejects instance URLs containing credentials', () => {
+    expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: 'https://user:password@gitlab.example.com', accessToken: 'secret' }).success).toBe(false);
+    expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: 'https://user@gitlab.example.com', accessToken: 'secret' }).success).toBe(false);
+  });
+
   it('rejects empty updates', () => {
     expect(updateGitLabInstanceSchema.safeParse({}).success).toBe(false);
   });

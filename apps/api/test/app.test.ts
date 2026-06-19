@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import type { GitLabInstance, Pagination, ReviewList, ReviewRun } from '@hunkwise/contracts';
+import type { GitLabInstance, Pagination, ReviewDetail, ReviewList } from '@hunkwise/contracts';
 import type { HunkwiseStore, NewInstanceRecord, UpdateInstanceRecord } from '@hunkwise/db';
 import { buildApp } from '../src/app.js';
 import { AesGcmSecretCipher } from '../src/crypto.js';
@@ -10,6 +10,7 @@ class MemoryStore implements HunkwiseStore {
   instances = new Map<string, GitLabInstance>();
   encryptedTokens: string[] = [];
   failPing = false;
+  review: ReviewDetail | null = null;
   async ping(): Promise<void> { if (this.failPing) throw new Error('down'); }
   async close(): Promise<void> {}
   async listInstances(): Promise<GitLabInstance[]> { return [...this.instances.values()]; }
@@ -31,7 +32,7 @@ class MemoryStore implements HunkwiseStore {
   }
   async deleteInstance(id: string): Promise<boolean> { return this.instances.delete(id); }
   async listReviews(page: Pagination): Promise<ReviewList> { return { items: [], total: 0, ...page }; }
-  async getReview(_id: string): Promise<ReviewRun | null> { return null; }
+  async getReview(id: string): Promise<ReviewDetail | null> { return this.review?.run.id === id ? this.review : null; }
 }
 
 const setup = async () => {
@@ -51,7 +52,12 @@ describe('API', () => {
     expect((await app.inject({ method: 'GET', url: '/health/live' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/health/ready' })).statusCode).toBe(200);
     store.failPing = true;
-    expect((await app.inject({ method: 'GET', url: '/health/ready' })).statusCode).toBe(503);
+    const unavailable = await app.inject({ method: 'GET', url: '/health/ready', headers: { 'x-request-id': 'ready-outage' } });
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json()).toMatchObject({ error: { code: 'dependency_unavailable', requestId: 'ready-outage', details: { checks: { database: 'unavailable' } } } });
+    expect((await app.inject({ method: 'GET', url: '/health/live' })).statusCode).toBe(200);
+    store.failPing = false;
+    expect((await app.inject({ method: 'GET', url: '/health/ready' })).statusCode).toBe(200);
     await app.close();
   });
 
@@ -77,6 +83,30 @@ describe('API', () => {
     await app.close();
   });
 
+  it('rejects GitLab URLs containing userinfo', async () => {
+    const { app } = await setup();
+    const response = await app.inject({ method: 'POST', url: '/api/instances', payload: { name: 'Unsafe', baseUrl: 'https://user:password@gitlab.example.com', accessToken: 'secret' } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('validation_error');
+    await app.close();
+  });
+
+  it('preserves parser, body limit, and UUID error semantics in the standard envelope', async () => {
+    const { app } = await setup();
+    const malformed = await app.inject({ method: 'POST', url: '/api/instances', headers: { 'content-type': 'application/json', 'x-request-id': 'bad-json' }, payload: '{"name":' });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toMatchObject({ error: { code: 'invalid_json', requestId: 'bad-json' } });
+
+    const oversized = await app.inject({ method: 'POST', url: '/api/instances', headers: { 'content-type': 'application/json', 'x-request-id': 'too-big' }, payload: `"${'x'.repeat(1024 * 1024 + 1)}"` });
+    expect(oversized.statusCode).toBe(413);
+    expect(oversized.json()).toMatchObject({ error: { code: 'payload_too_large', requestId: 'too-big' } });
+
+    const invalidId = await app.inject({ method: 'GET', url: '/api/instances/not-a-uuid', headers: { 'x-request-id': 'bad-id' } });
+    expect(invalidId.statusCode).toBe(400);
+    expect(invalidId.json()).toMatchObject({ error: { code: 'invalid_request', requestId: 'bad-id' } });
+    await app.close();
+  });
+
   it('fails review submission clearly while GitLab is unavailable', async () => {
     const { app } = await setup();
     const created = await app.inject({ method: 'POST', url: '/api/instances', payload: { name: 'Team', baseUrl: 'https://gitlab.example.com', accessToken: 'secret' } });
@@ -85,5 +115,18 @@ describe('API', () => {
     expect(response.json().error.code).toBe('integration_not_implemented');
     await app.close();
   });
-});
 
+  it('serves persisted review detail through the detail contract', async () => {
+    const { app, store } = await setup();
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    store.review = {
+      run: { id, mergeRequestId: randomUUID(), status: 'completed', sourceSha: 'abc123', summary: null, errorMessage: null, startedAt: now, completedAt: now, createdAt: now, updatedAt: now },
+      files: [], hunks: [], findings: [], discussions: [], comments: [], chatMessages: []
+    };
+    const response = await app.inject({ method: 'GET', url: `/api/reviews/${id}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ run: { id }, files: [], findings: [], chatMessages: [] });
+    await app.close();
+  });
+});
