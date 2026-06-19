@@ -7,6 +7,13 @@ describe('API contracts', () => {
     expect(value.baseUrl).toBe('https://gitlab.example.com');
   });
 
+  it('canonicalizes uppercase instance URL scheme and host before persistence', () => {
+    const https = createGitLabInstanceSchema.parse({ name: 'Work', baseUrl: 'HTTPS://GITLAB-UPPERCASE.EXAMPLE.COM/team/project/', accessToken: 'secret' });
+    const http = updateGitLabInstanceSchema.parse({ baseUrl: 'HTTP://GITLAB-UPPERCASE.EXAMPLE.COM/team/project/' });
+    expect(https.baseUrl).toBe('https://gitlab-uppercase.example.com/team/project');
+    expect(http.baseUrl).toBe('http://gitlab-uppercase.example.com/team/project');
+  });
+
   it('allows only HTTP(S) instance URLs', () => {
     expect(createGitLabInstanceSchema.safeParse({ name: 'Work', baseUrl: 'ftp://gitlab.example.com', accessToken: 'secret' }).success).toBe(false);
   });

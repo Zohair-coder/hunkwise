@@ -48,7 +48,8 @@ describe('PostgreSQL persistence', () => {
     expect(result.rows.map((row) => row.name)).toEqual([
       '001_foundation.sql',
       '002_review_ownership_integrity.sql',
-      '003_gitlab_base_url_shape.sql'
+      '003_gitlab_base_url_shape.sql',
+      '004_case_insensitive_gitlab_base_url.sql'
     ]);
     expect(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
   });
@@ -70,6 +71,13 @@ describe('PostgreSQL persistence', () => {
       .rejects.toMatchObject({ code: '23514' });
     await expect(pool.query("INSERT INTO gitlab_instances (name, base_url, access_token_ciphertext) VALUES ('Fragment', 'https://gitlab.test/group#access_token=secret', 'v1:ciphertext')"))
       .rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('accepts uppercase HTTP and HTTPS schemes at the database boundary', async () => {
+    const https = await pool.query<{ base_url: string }>("INSERT INTO gitlab_instances (name, base_url, access_token_ciphertext) VALUES ('Upper HTTPS', 'HTTPS://gitlab-uppercase.test/team', 'v1:ciphertext') RETURNING base_url");
+    const http = await pool.query<{ base_url: string }>("INSERT INTO gitlab_instances (name, base_url, access_token_ciphertext) VALUES ('Upper HTTP', 'HTTP://gitlab-http-uppercase.test/team', 'v1:ciphertext') RETURNING base_url");
+    expect(https.rows[0]?.base_url).toBe('HTTPS://gitlab-uppercase.test/team');
+    expect(http.rows[0]?.base_url).toBe('HTTP://gitlab-http-uppercase.test/team');
   });
 
   it('uses stable tie-break ordering and returns persisted review detail', async () => {

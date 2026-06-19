@@ -12,6 +12,11 @@ const usesHttp = (value: string): boolean => {
 const httpUrl = z.string().url().refine(usesHttp, 'Must use HTTP(S)');
 const isCleanInstanceBaseUrl = (value: string): boolean =>
   usesHttp(value) && !value.includes('?') && !value.includes('#') && !/\s/.test(value);
+const canonicalizeInstanceBaseUrl = (value: string): string => {
+  const parsed = new URL(value);
+  const pathname = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/$/, '');
+  return `${parsed.origin}${pathname}`;
+};
 const instanceBaseUrl = z.string().url().refine(
   isCleanInstanceBaseUrl,
   'Must be an HTTP(S) base URL without credentials, query, or fragment'
@@ -29,7 +34,7 @@ export type GitLabInstance = z.infer<typeof gitLabInstanceSchema>;
 
 export const createGitLabInstanceSchema = z.object({
   name: nonEmpty.max(120),
-  baseUrl: instanceBaseUrl.transform((url) => url.replace(/\/$/, '')),
+  baseUrl: instanceBaseUrl.transform(canonicalizeInstanceBaseUrl),
   accessToken: nonEmpty.max(2048)
 });
 export type CreateGitLabInstance = z.infer<typeof createGitLabInstanceSchema>;

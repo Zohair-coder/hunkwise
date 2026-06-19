@@ -74,6 +74,26 @@ describe('API', () => {
     await app.close();
   });
 
+  it('canonicalizes uppercase HTTP and HTTPS GitLab base URLs before storing', async () => {
+    const { app } = await setup();
+    const https = await app.inject({
+      method: 'POST',
+      url: '/api/instances',
+      payload: { name: 'Upper HTTPS', baseUrl: 'HTTPS://GITLAB-UPPERCASE.EXAMPLE.COM/team/project/', accessToken: 'secret' }
+    });
+    expect(https.statusCode).toBe(201);
+    expect(https.json().baseUrl).toBe('https://gitlab-uppercase.example.com/team/project');
+
+    const http = await app.inject({
+      method: 'PATCH',
+      url: `/api/instances/${https.json().id}`,
+      payload: { baseUrl: 'HTTP://GITLAB-HTTP-UPPERCASE.EXAMPLE.COM/team/project/' }
+    });
+    expect(http.statusCode).toBe(200);
+    expect(http.json().baseUrl).toBe('http://gitlab-http-uppercase.example.com/team/project');
+    await app.close();
+  });
+
   it('validates requests and returns request IDs', async () => {
     const { app } = await setup();
     const response = await app.inject({ method: 'POST', url: '/api/instances', headers: { 'x-request-id': 'test-request' }, payload: {} });
