@@ -125,6 +125,39 @@ The app applies checksum-verified migrations under a PostgreSQL advisory lock, t
 
 As of June 19, 2026, the full development dependency audit reports the low-severity `GHSA-g7r4-m6w7-qqqr` advisory in `esbuild@0.27.7`. It is introduced by `tsup@8.5.1`, the latest compatible `tsup` release, whose declared range is `esbuild ^0.27.0`. The advisory is fixed in `esbuild@0.28.1`, which is outside that range. No override is applied because forcing the incompatible major-minor line would bypass the build tool's compatibility contract. Production dependencies audit cleanly with `npm audit --omit=dev`.
 
+## Real GitLab CE E2E
+
+Slice 5 includes an explicit, expensive E2E harness that runs a real self-hosted GitLab CE instance plus the Hunkwise app/PostgreSQL stack through Docker Compose. It is not part of the default unit test suite.
+
+Prerequisites: Docker with at least 6 GB of free memory available to containers, 10 GB of free disk, Node.js dependencies installed, and 10-20 minutes for the first run while GitLab initializes. Set `OPENAI_API_KEY` in your shell; the harness passes it only to the app container and redacts known key/token patterns from command output.
+
+```bash
+export OPENAI_API_KEY="sk-..."
+npm run e2e:gitlab
+```
+
+Useful options:
+
+```bash
+npm run e2e:gitlab -- --project-name hunkwise-gitlab-e2e-2 --gitlab-http-port 18088 --app-port 13000
+npm run e2e:gitlab -- --keep
+npm run e2e:gitlab -- --cleanup --project-name hunkwise-gitlab-e2e
+```
+
+The harness generates local-only GitLab root passwords, GitLab API tokens, PostgreSQL passwords, webhook secrets, and app encryption keys at runtime. It does not write those secrets to the repository. On success it removes containers and volumes unless `--keep` is supplied. On failure it leaves the Compose project running for inspection and prints the exact cleanup command.
+
+What success verifies:
+
+- GitLab CE boots and a runtime root token can call the real GitLab API.
+- A real GitLab project is created with a `main` branch, feature branch, real commits, and a merge request containing a reviewable code diff.
+- A pre-existing GitLab MR discussion is created before ingestion.
+- Hunkwise registers the GitLab instance with the real token, tests the connection, submits the real MR URL, and persists MR metadata, diff files, hunks, imported discussions, and comments.
+- Hunkwise runs the OpenAI-backed review agent using `OPENAI_API_KEY`.
+- Hunkwise posts the AI overview and one grounded postable finding when the model returns one. If no grounded postable finding is available, it still posts and verifies the overview and reports that overview-only branch in the sanitized summary.
+- The harness reads GitLab discussions back through the real GitLab API and verifies the posted discussion IDs exist.
+
+The Compose overlay is `docker-compose.gitlab-e2e.yml`. Override `GITLAB_IMAGE` to test a different GitLab CE tag; the default is pinned to `gitlab/gitlab-ce:17.11.0-ce.0` for repeatability.
+
 ## REST contracts
 
 | Method | Path | Behavior |

@@ -29,7 +29,7 @@ services:
       GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:-hunkwise-local-webhook-secret}
     command: ["sh", "-c", "node packages/db/dist/migrate.js && node apps/api/dist/main.js"]
     ports:
-      - "3000:3000"
+      - "${HUNKWISE_APP_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy

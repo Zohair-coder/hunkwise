@@ -1,0 +1,43 @@
+services:
+  gitlab:
+    image: ${GITLAB_IMAGE:-gitlab/gitlab-ce:17.11.0-ce.0}
+    hostname: gitlab
+    shm_size: 256m
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab'
+        gitlab_rails['initial_root_password'] = '${GITLAB_ROOT_PASSWORD:?Set GITLAB_ROOT_PASSWORD}'
+        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2224}
+        letsencrypt['enable'] = false
+        puma['worker_processes'] = 0
+        sidekiq['max_concurrency'] = 5
+        prometheus_monitoring['enable'] = false
+    ports:
+      - "${GITLAB_HTTP_PORT:-8088}:80"
+      - "${GITLAB_SSH_PORT:-2224}:22"
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/-/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 60
+      start_period: 120s
+    restart: unless-stopped
+
+  app:
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gitlab:
+        condition: service_started
+
+volumes:
+  gitlab-config:
+  gitlab-logs:
+  gitlab-data:

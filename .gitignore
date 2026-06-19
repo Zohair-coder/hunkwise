@@ -1,9 +1,9 @@
 node_modules/
 dist/
 coverage/
+tmp/
 .env
 *.log
 .DS_Store
 .vite/
 .devin-review-reference.png
-
