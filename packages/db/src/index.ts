@@ -8,6 +8,7 @@ import type {
   DiffHunk,
   Discussion,
   Finding,
+  MergeRequest,
   GitLabInstance,
   Pagination,
   ReviewDetail,
@@ -255,6 +256,22 @@ interface ReviewRow {
   updated_at: Date;
 }
 
+interface MergeRequestRow {
+  id: string;
+  project_id: string;
+  gitlab_iid: number;
+  title: string;
+  author_username: string;
+  source_branch: string;
+  target_branch: string;
+  source_sha: string;
+  target_sha: string;
+  state: MergeRequest['state'];
+  web_url: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
 interface DiffFileRow { id: string; review_run_id: string; old_path: string | null; new_path: string; status: DiffFile['status']; additions: number; deletions: number }
 interface DiffHunkRow { id: string; diff_file_id: string; old_start: number; old_lines: number; new_start: number; new_lines: number; header: string; patch: string; position: number }
 interface FindingRow {
@@ -319,6 +336,22 @@ const mapReview = (row: ReviewRow): ReviewRun => ({
   overviewCommentBody: row.overview_comment_body,
   startedAt: row.started_at ? iso(row.started_at) : null,
   completedAt: row.completed_at ? iso(row.completed_at) : null,
+  createdAt: iso(row.created_at),
+  updatedAt: iso(row.updated_at)
+});
+
+const mapMergeRequest = (row: MergeRequestRow): MergeRequest => ({
+  id: row.id,
+  projectId: row.project_id,
+  gitlabIid: row.gitlab_iid,
+  title: row.title,
+  authorUsername: row.author_username,
+  sourceBranch: row.source_branch,
+  targetBranch: row.target_branch,
+  sourceSha: row.source_sha,
+  targetSha: row.target_sha,
+  state: row.state,
+  webUrl: row.web_url,
   createdAt: iso(row.created_at),
   updatedAt: iso(row.updated_at)
 });
@@ -476,6 +509,12 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
         await client.query('COMMIT');
         return null;
       }
+      const mergeRequest = await client.query<MergeRequestRow>(
+        `SELECT id, project_id, gitlab_iid, title, author_username, source_branch,
+                target_branch, source_sha, target_sha, state, web_url, created_at, updated_at
+         FROM merge_requests WHERE id = $1`,
+        [run.merge_request_id]
+      );
       const files = await client.query<DiffFileRow>('SELECT id, review_run_id, old_path, new_path, status, additions, deletions FROM diff_files WHERE review_run_id = $1 ORDER BY new_path, id', [id]);
       const hunks = await client.query<DiffHunkRow>('SELECT h.id, h.diff_file_id, h.old_start, h.old_lines, h.new_start, h.new_lines, h.header, h.patch, h.position FROM diff_hunks h JOIN diff_files f ON f.id = h.diff_file_id WHERE f.review_run_id = $1 ORDER BY f.new_path, h.position, h.id', [id]);
       const findings = await client.query<FindingRow>(
@@ -489,7 +528,15 @@ export class PostgresStore implements HunkwiseStore, InstanceSecretStore, GitLab
       const comments = await client.query<CommentRow>('SELECT c.id, c.discussion_id, c.author_type, c.author_name, c.body, c.gitlab_note_id, c.created_at FROM comments c JOIN discussions d ON d.id = c.discussion_id WHERE d.review_run_id = $1 ORDER BY c.created_at, c.id', [id]);
       const chatMessages = await client.query<ChatMessageRow>('SELECT id, review_run_id, role, content, created_at FROM chat_messages WHERE review_run_id = $1 ORDER BY created_at, id', [id]);
       await client.query('COMMIT');
-      return { run: mapReview(run), files: files.rows.map(mapDiffFile), hunks: hunks.rows.map(mapDiffHunk), findings: findings.rows.map(mapFinding), discussions: discussions.rows.map(mapDiscussion), comments: comments.rows.map(mapComment), chatMessages: chatMessages.rows.map(mapChatMessage) };
+      return {
+        run: { ...mapReview(run), ...(mergeRequest.rows[0] ? { mergeRequest: mapMergeRequest(mergeRequest.rows[0]) } : {}) },
+        files: files.rows.map(mapDiffFile),
+        hunks: hunks.rows.map(mapDiffHunk),
+        findings: findings.rows.map(mapFinding),
+        discussions: discussions.rows.map(mapDiscussion),
+        comments: comments.rows.map(mapComment),
+        chatMessages: chatMessages.rows.map(mapChatMessage)
+      };
     } catch (error) {
       await rollback(client);
       throw error;

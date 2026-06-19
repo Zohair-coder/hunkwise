@@ -90,6 +90,7 @@ describe('PostgreSQL persistence', () => {
     expect(page.items.map((run) => run.id)).toEqual([runs.first, runs.second].sort().reverse());
     const detail = await store.getReview(runs.first);
     expect(detail?.run.id).toBe(runs.first);
+    expect(detail?.run.mergeRequest).toMatchObject({ title: 'MR', authorUsername: 'author', sourceBranch: 'feature', targetBranch: 'main', webUrl: 'https://gitlab.test/group/project/-/merge_requests/1' });
     expect(detail?.files.map((file) => file.newPath)).toEqual(['one.ts']);
     expect(detail?.hunks.map((hunk) => hunk.patch)).toEqual(['+one']);
   });
@@ -142,6 +143,7 @@ describe('PostgreSQL persistence', () => {
     const runs = await store.listReviews({ limit: 20, offset: 0 });
     expect(runs.total).toBe(1);
     const detail = await store.getReview(first.runId);
+    expect(detail?.run.mergeRequest).toMatchObject({ gitlabIid: 7, title: 'MR', authorUsername: 'alice', sourceBranch: 'feature', targetBranch: 'main' });
     expect(detail?.files).toMatchObject([{ newPath: 'a.ts', additions: 1, deletions: 1 }]);
     expect(detail?.hunks).toMatchObject([{ header: '@@ -1 +1 @@', position: 0 }]);
     expect(detail?.discussions).toMatchObject([{ gitlabDiscussionId: 'discussion-1', resolved: false }]);

@@ -46,17 +46,20 @@ Acceptance criteria:
 - Posting selected findings/comments uses GitLab discussion endpoints and stores external IDs/idempotency keys to avoid duplicate comments.
 - Unit, API, DB, and contract tests cover prompt building, truncation/redaction, schema validation, duplicate suppression, GitLab position mapping, persistence, and mocked OpenAI/GitLab flows.
 
-## Slice 4 — Collaboration and chat
+## Slice 4 — Devin Review-like review workspace UI
 
-Complete the interactive review workflow: finding disposition, GitLab discussion publishing, and MR-grounded chat.
+Status: implemented in this slice. The web app now supports self-hosted GitLab instance creation/list/test flows, MR URL submission, review status with persisted MR metadata and AI model output, organized diff browsing with line anchors, finding filters/details, overview/finding posting actions, existing discussion display where persisted metadata can anchor it, and clear loading/empty/error states with displayed secret redaction.
 
 Acceptance criteria:
 
-- Users can filter/navigate findings, dismiss or mark fixed, and manage the Slice 3 publishing flow in the UI.
-- Discussion resolution remains synchronized in both directions with conflict-safe updates.
-- Chat streams answers grounded in the selected run and cites relevant files/findings.
-- Authorization prevents cross-instance/project data access and all mutating actions are audited.
-- Accessible loading, optimistic, empty, and error states work across desktop and compact layouts.
+- Users can configure self-hosted GitLab instances without displaying stored tokens.
+- Users can submit GitLab MR URLs and request ingestion with optional AI review/posting flags.
+- Users can inspect MR title, author, branches, run status, AI summary, model, and run timing.
+- Users can browse changed files, grouped hunks, line numbers, additions/deletions/context, and inline finding anchors.
+- Users can filter findings by severity/category/post state, inspect rationale/suggested fixes, and post selected overview/finding output through Slice 3 APIs.
+- Existing GitLab discussions/comments are displayed near anchored findings or in file-level discussion sections when only unpositioned data is available.
+- Invalid MR URLs, GitLab auth errors, missing OpenAI configuration, ingestion failures, and empty states are shown without exposing token-like values.
+- Component tests and browser validation cover the local UI with mocked backend data.
 
 ## Slice 5 — Production hardening and release
 

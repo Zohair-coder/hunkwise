@@ -1,6 +1,6 @@
 # Hunkwise
 
-Hunkwise is a self-hosted GitLab code-review workspace. Slice 3 adds an OpenAI-backed review agent on top of the GitLab ingestion foundation: merge requests can be ingested, reviewed into structured findings, and selectively posted back to GitLab with duplicate suppression.
+Hunkwise is a self-hosted GitLab code-review workspace. Slice 4 adds a usable web review product on top of the GitLab ingestion and OpenAI review foundation: configure self-hosted GitLab instances, submit MR URLs, inspect run status, browse hunks, review findings, and selectively post overview/finding comments back to GitLab.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ apps/api  ───────► packages/contracts
 - `packages/contracts`: Zod request/domain schemas shared by API and UI.
 - `packages/db`: a small `pg` store interface, PostgreSQL implementation, and ordered SQL migrations.
 - `apps/api`: Fastify composition root, REST routes, AES-256-GCM secret boundary, GitLab REST client, MR ingestion service, OpenAI review adapter, webhook receiver, and health checks.
-- `apps/web`: React/Vite landing page and responsive three-column review workspace.
+- `apps/web`: React/Vite review workspace for GitLab instance setup, MR submission, status, diff browsing, findings, and posting actions.
 
 GitLab tokens cross the API only on instance create/update. They are encrypted before the store receives them, using a versioned AES-256-GCM envelope with a random nonce. Responses expose only `hasAccessToken`. A separate `InstanceSecretStore` capability and `InstanceCredentialProvider` form the narrow retrieval/decryption boundary for the outbound GitLab adapter; public DTOs never carry tokens and request errors do not include token values. Back up `APP_ENCRYPTION_KEY` securely; changing it makes existing credentials unreadable. Production deployments should inject it from a secret manager.
 
@@ -35,7 +35,14 @@ npm run db:migrate
 npm run dev
 ```
 
-Vite runs at `http://localhost:5173` and proxies API calls to Fastify on port `3000`. Build and validate everything with:
+Vite runs at `http://localhost:5173` and proxies API calls to Fastify on port `3000`. In the web UI:
+
+1. Add a GitLab instance with a display name, base URL, and token. The token is submitted to the API and cleared from the form; responses only show whether a token is stored.
+2. Test the stored GitLab connection from the instance list.
+3. Paste a merge request URL in `/namespace/project/-/merge_requests/:iid` form, choose whether to run AI review, and submit.
+4. Use the review workspace to refresh the MR, re-run AI, browse files/hunks with line anchors, inspect existing discussions, filter findings, preview the overview comment, and post selected AI output.
+
+Build and validate everything with:
 
 ```bash
 npm run check
