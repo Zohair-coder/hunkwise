@@ -21,9 +21,11 @@ export class ApiError extends Error {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has('content-type')) headers.set('content-type', 'application/json');
   const response = await fetch(url, {
     ...init,
-    headers: { 'content-type': 'application/json', ...init?.headers }
+    headers
   });
   if (!response.ok) {
     const fallback = { error: { code: 'request_failed', message: `Request failed (${response.status})`, requestId: 'unknown' } };
